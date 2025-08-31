@@ -14,6 +14,7 @@ if(!require("leaflet")){
     stopifnot(require("leaflet"))
 }
 
+
 baruch_latitude  <- +40.7404
 baruch_longitude <- -73.9832
 
