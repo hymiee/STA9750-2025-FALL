@@ -1,7 +1,7 @@
 ---
 title: "Hymie Israel STA 9750 Mini-Project Website"
 ---
-Hi, my name is Hymie Israel and I am a MS student in the Business Analytics program with a focus on Data Analytics at Baruch College. I graduated undergraduate at Baruch with a major in Finance. 
+Hi, my name is Hymie Israel and I am a MS student in the Business Analytics program with a focus on Data Analytics at Baruch College.
 
 ```{r}
 #| echo: false
@@ -29,4 +29,4 @@ leaflet() |>
 1+1
 ```
 --------------
-Last Updated: `r format(Sys.time(), "%A %m/%d, %Y at %H:%M%p")`
+Last Updated: `r format(Sys.time(), "%A %m %d, %Y at %H:%M%p")`
