@@ -13,7 +13,7 @@ website:
       - text: "Home"
         href: index.qmd
       - text: "Mini-Project01"
-        href: mp01.qmd
+        href: mp01.qmd 
     
 format:
   html:
