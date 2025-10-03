@@ -4,7 +4,7 @@ project:
 
 website:
   title: "STA 9750 Submission Material"
-  description: Course Projects for STA 9750 at Baruch College
+  description: "Course Projects for STA 9750 at Baruch College"
   site-url: "https://hymiee.github.io/STA9750-2025-FALL/"
   navbar:
     background: primary
@@ -12,12 +12,16 @@ website:
     right:
       - text: "Home"
         href: index.qmd
-      - text: "Mini-Project01"
-        href: mp01.qmd 
-    
+      - text: "Projects"
+        menu:
+          - text: "Mini-Project 01"
+            href: mp01.qmd
+      - icon: github
+        href: https://github.com/hymiee
+
 format:
   html:
-    theme: cosmo 
+    theme: cosmo
     toc: false
 
 editor:
