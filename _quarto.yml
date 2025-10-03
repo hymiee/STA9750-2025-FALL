@@ -10,6 +10,11 @@ website:
   navbar:
     background: primary
     search: false
+    right:
+      - text: "Home"
+        href: index.qmd
+      - text: Mini-Project01
+        href: mp01.qmd
     
 format:
   html:
