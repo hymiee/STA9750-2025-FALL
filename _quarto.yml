@@ -10,6 +10,13 @@ website:
   navbar:
     background: primary
     search: false
+    right:
+      - text: "Home"
+        href: index.qmd
+      - text: Mini-Project01
+        href: mp01.qmd
+        icon: "C:\Users\hymie\Downloads\GitHub_Invertocat_Logo.svg.png"
+        href: https://github.com/hymiee
     
 format:
   html:
