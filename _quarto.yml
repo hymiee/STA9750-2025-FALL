@@ -13,7 +13,7 @@ website:
     
 format:
   html:
-    theme: darkly 
+    theme: cosmo 
     toc: false
 
 editor:
