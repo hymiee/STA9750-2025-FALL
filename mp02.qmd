@@ -420,7 +420,7 @@ The stakes are particularly high for young workers, families, and service indust
 ## **Data Relationships**
 
 ```{r relationship-diagram, echo=FALSE}
-include_graphics("docs/mp02_files/figure-html/Relationship Diagram2.png")
+include_graphics("images/Relationship Diagram2.png")
 ```
 ### Key Joining Information
 ##### GEOID/CBSA Relationship:
