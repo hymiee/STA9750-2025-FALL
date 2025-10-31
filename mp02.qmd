@@ -1275,7 +1275,7 @@ growth_DT <- datatable(
     backgroundSize = '90% 80%',
     backgroundRepeat = 'no-repeat',
     backgroundPosition = 'center'
-  )
+  ) 
 
 # Top/Bottom CBSAs by Composite Score
 composite_top <- housing_growth_data |>
