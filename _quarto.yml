@@ -18,6 +18,8 @@ website:
             href: mp01.qmd
           - text: "Mini-Project 02"
             href: mp02.qmd 
+          - text: "Mini-Project 03"
+            href: mp03.qmd
       - icon: github
         href: https://github.com/hymiee
 
