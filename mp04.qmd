@@ -1,0 +1,1793 @@
+---
+title: "Just the Fact(-Check)s, Ma’am!"
+author: "Hymie Israel"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    toc-expand: false
+    code-fold: true
+---
+
+```{r packages, include=FALSE}
+# LOAD & INSTALL REQUIRED PACKACGES
+if(!require("tidyverse")) install.packages("tidyverse")
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+if(!require("sf")) install.packages("sf")
+library(sf)
+
+if(!require("rvest")) install.packages("rvest")
+library(rvest)
+
+if(!require("httr2")) install.packages("httr2")
+library(httr2)
+
+if(!require("jsonlite")) install.packages("jsonlite")
+library(jsonlite)
+
+if(!require("htmltools")) install.packages("htmltools")
+library(htmltools)
+
+if(!require("DT")) install.packages("DT")
+library(DT)
+
+if(!require("knitr")) install.packages("knitr")
+library(knitr)
+
+if(!require("scales")) install.packages("scales")
+library(scales)
+
+if(!require("ggrepel")) install.packages("ggrepel")
+library(ggrepel)
+
+if(!require("gganimate")) install.packages("gganimate")
+library(gganimate)
+
+if(!require("ggtext")) install.packages("ggtext")
+library(ggtext)
+if(!require("gifski")) install.packages("gifski")
+library(gifski)
+
+if(!require("png")) install.packages("png")
+library(png)
+
+if(!require("gghighlight")) install.packages("gghighlight")
+library(gghighlight)
+
+if(!require("RcppRoll")) install.packages("RcppRoll")
+library(RcppRoll)
+
+if(!require("htmlwidgets")) install.packages("htmlwidgets")
+library(htmlwidgets)
+
+if(!require("leaflet")) install.packages("leaflet")
+library(leaflet)
+
+if(!require("purrr")) install.packages("purrr")
+library(purrr)
+
+if(!require("infer")) install.packages("infer")
+library(infer)
+
+if(!require("grid")) install.packages("grid")
+library(grid)
+
+if(!require("gridExtra")) install.packages("gridExtra")
+library(gridExtra)
+```
+
+```{r nonfarm-payroll-download, include=FALSE}
+# Download CES Total Nonfarm Payroll
+
+get_nonfarm_payroll <- function() {
+  
+  resp <- request("https://data.bls.gov/pdq/SurveyOutputServlet") |>
+    req_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36") |>
+    req_body_form(
+      request_action = "get_data",
+      reformat = "true",
+      from_results_page = "true",
+      years_option = "specific_years",
+      delimiter = "comma",
+      output_type = "multi",
+      periods_option = "all_periods",
+      output_view = "data",
+      from_year = "1979",
+      to_year = "2025",
+      series_id = "CES0000000001",
+      initial_request = "false",
+      data_tool = "surveymost",
+      annualAveragesRequested = "false",
+      original_annualAveragesRequested = "false"
+    ) |>
+    req_perform()
+  
+  html <- resp |> resp_body_html()
+  table_data <- html |> html_element("table.regular-data") |> html_table()
+  
+  cat("Table dimensions:", nrow(table_data), "x", ncol(table_data), "\n")
+  cat("First few column names:", paste(names(table_data)[1:5], collapse = ", "), "\n\n")
+  
+  # Get row 1 (the actual data row)
+  data_row <- table_data[1, ]
+  
+  # Get column names (skip first column which is "Series ID")
+  date_cols <- names(table_data)[-1]
+  
+  # Get values from row 1 (skip first column)
+  values <- as.character(data_row[-1])
+  
+  # Create dataframe
+  clean_data <- data.frame(
+    date_str = date_cols,
+    level = values,
+    stringsAsFactors = FALSE
+  ) |>
+    mutate(
+      # Clean values - remove (P) and whitespace
+      level = gsub("\\(.*\\)", "", level),
+      level = trimws(level),
+      # Parse date from column names like "Jan 1979" or "Jan 79"
+      # Use my() for "Month Year" format which handles full years correctly
+      date = my(date_str),
+      # Convert to numeric
+      level = suppressWarnings(as.numeric(gsub(",", "", level)))
+    ) |>
+    filter(!is.na(date) & !is.na(level)) |>
+    select(date, level) |>
+    arrange(date) |>
+    filter(date >= as.Date("1979-01-01"))
+  
+  return(clean_data)
+}
+
+payroll_data <- get_nonfarm_payroll()
+
+```
+
+```{r CES-revisions-download, include=FALSE}
+# Download CES Revisions Tables
+
+get_revisions_for_year <- function(year, html) {
+  # Target the specific table for this year using CSS selector
+  table_selector <- paste0("table#", year, ".regular")
+  
+  table <- html |>
+    html_element(table_selector) |>
+    html_element("tbody") |>
+    html_table(header = FALSE)
+  
+  # If table is NULL or empty, return empty data frame
+  if (is.null(table) || nrow(table) == 0) {
+    return(data.frame(date = as.Date(character()),
+                      original = numeric(),
+                      final = numeric(),
+                      revision = numeric()))
+  }
+  
+  # Structure: Month, Year, 1st, 2nd, 3rd, 2nd-1st, 3rd-2nd, 3rd-1st
+  clean_table <- table |>
+    slice(1:12) |>
+    select(month = 1, original = 3, final = 5, revision = 8) |>
+    mutate(
+      month = gsub("\\.", "", month),
+      month = trimws(month),
+      date_str = paste(year, month),
+      date = suppressWarnings(ym(date_str)),
+      original = suppressWarnings(as.numeric(gsub(",", "", as.character(original)))),
+      final = suppressWarnings(as.numeric(gsub(",", "", as.character(final)))),
+      revision = suppressWarnings(as.numeric(gsub(",", "", as.character(revision))))
+    ) |>
+    filter(!is.na(date)) |>
+    select(date, original, final, revision)
+  
+  return(clean_table)
+}
+
+get_all_revisions <- function() {
+  
+  resp <- request("https://www.bls.gov/web/empsit/cesnaicsrev.htm") |>
+    req_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36") |>
+    req_perform()
+  
+  html <- resp |> resp_body_html()
+  
+  years <- 1979:2025
+  
+  all_revisions <- map(years, ~get_revisions_for_year(.x, html)) |>
+    list_rbind()
+  
+  return(all_revisions)
+}
+
+revisions_data <- get_all_revisions()
+```
+
+# Executive Summary
+
+## The Headline That Moves Markets: Understanding Employment Data in an Era of Misinformation
+
+Every first Friday of the month, the Bureau of Labor Statistics releases a single number that can shift billions of dollars in financial markets, influence Federal Reserve policy decisions, and dominate political discourse: the change in U.S. non-farm payroll employment. When the December 2024 jobs report announced 256,000 jobs added, stock futures jumped, interest rate expectations shifted, and political leaders rushed to claim credit or assign blame. Yet within this headline lies a more complex statistical story that reveals as much about the challenges of measuring a dynamic $28 trillion economy as it does about the state of American labor markets.
+
+## The Hidden World of Statistical Revisions
+
+What most Americans don't know is that the employment number dominating Friday morning news is a preliminary estimate based on incomplete survey data, subject to two subsequent revisions as more complete information becomes available. Only after these revisions do we have a reasonably accurate picture of employment in any given month.
+
+## From Statistical Artifact to Political Weapon
+
+In recent years, these routine statistical revisions have been increasingly weaponized in political discourse. Claims that employment data has been "rigged," "manipulated," or deliberately inflated to favor one administration over another have proliferated on social media, cable news, and political campaigns.
+
+## The Fundamental Question: Is There Evidence of Systematic Bias?
+
+This raises a critical question. Do the patterns in employment revisions support claims of political manipulation, or do they reflect the inherent statistical challenges of real-time economic measurement? Have revisions become larger or more biased in recent years? Do Democratic and Republican administrations show systematically different revision patterns? And how should we interpret employment comparisons across administrations when unprecedented shocks like the COVID-19 pandemic distort every conventional metric?
+
+## This Project: A Comprehensive Statistical Investigation
+
+This project undertakes a systematic analysis of 45 years of Current Employment Statistics (CES) data spanning January 1979 through June 2025, encompassing nine presidential administrations, multiple business cycles, and the most severe economic shock since the Great Depression. Our investigation proceeds in four stages:
+
+### Stage 1: Data Acquisition and Integration
+We employ web scraping techniques using R's httr2 and rvest packages to directly access official BLS data sources, retrieving both final employment levels and the revision history for every month over the 45-year period.
+
+### Stage 2: Exploratory Data Analysis
+With integrated data spanning employment levels and revisions, we conduct comprehensive exploratory analysis to identify patterns, outliers, and temporal trends. This includes calculating key statistics about revision magnitudes, directions, and volatility across different time periods and administrations. We examine whether certain months show systematically larger revisions, whether revision accuracy has improved or deteriorated over time, and how the absolute and relative size of revisions has evolved as the economy has grown. Visualization plays a critical role in this stage, allowing patterns that might be obscured in summary statistics to emerge clearly in time series plots, box plots, and distributional analyses.
+
+### Stage 3: Statistical Inference and Hypothesis Testing
+Moving beyond description to inference, we employ formal statistical tests to evaluate specific hypotheses about revision patterns. Using two-sample t-tests, one-sample t-tests, and proportion tests from the infer package, we rigorously assess whether observed differences between time periods or administrations are statistically significant or could arise from random variation.
+
+### Stage 4: Fact-Checking Political Claims
+Finally, we apply our empirical findings to evaluate specific political claims about employment data and revisions. Using the PolitiFact Truth-O-Meter framework, we assess two representative claims: (1) that the Biden administration systematically inflated jobs numbers through deliberately biased initial estimates, and (2) that employment growth was stronger under Trump than Biden. For each claim, we conduct targeted hypothesis tests, present relevant statistics and visualizations, and render a verdict based on the weight of statistical evidence. 
+
+## Why This Analysis Matters
+The stakes of this investigation extend beyond settling political debates. The integrity of federal economic statistics is foundational to democratic governance and effective policymaking. If political leaders, businesses, and citizens cannot trust the accuracy and independence of employment data, the consequences cascade throughout the economy.
+
+# Data Acquisition and Integration
+```{r ref.label='nonfarm-payroll-download', eval=FALSE, echo=TRUE}
+```
+
+```{r ref.label='CES-revisions-download', eval=FALSE, echo=TRUE}
+```
+
+```{r data-integration}
+# Join the two datasets
+payroll_revisions_data <- payroll_data |>
+  left_join(revisions_data, by = "date") |>
+  mutate(
+    # Calculate month-over-month change in employment level
+    level_change = level - lag(level),
+    # Calculate relative revision magnitude (as % of final estimate)
+    rel_revision = abs(revision) / abs(final) * 100,
+    # Calculate revision as % of employment level
+    revision_pct_level = revision / level * 100,
+    # Calculate absolute revision magnitude
+    abs_revision = abs(revision),
+    # Extract year, month, decade for grouping
+    year = year(date),
+    month = month(date, label = TRUE),
+    decade = floor(year / 10) * 10,
+    # Create period indicators
+    post_2000 = year >= 2000,
+    post_2020 = year >= 2020,
+    # Categorize revisions
+    is_negative = revision < 0,
+    is_large_revision = abs_revision > 100,
+    large_revision_pct = abs(revision_pct_level) > 0.1,
+    # Categorize level changes
+    large_level_change = abs(level_change) > median(abs(level_change), na.rm = TRUE)
+  )
+```
+
+```{r largest-revisions, include=FALSE}
+# Statistic 1: Largest positive and negative revisions
+largest_positive <- payroll_revisions_data |>
+  filter(revision == max(revision, na.rm = TRUE)) |>
+  select(date, revision, original, final)
+
+largest_negative <- payroll_revisions_data |>
+  filter(revision == min(revision, na.rm = TRUE)) |>
+  select(date, revision, original, final)
+```
+# Exploratory Data Analysis
+
+## Quantitative Statistics
+
+### 1. Historical Extremes in Revisions
+
+**Interpretation:** The most dramatic revisions in CES history occurred during periods of economic crisis. The largest negative revision of **`r largest_negative$revision` thousand jobs in `r format(largest_negative$date, "%B %Y")`** coincided with the onset of the COVID-19 pandemic, reflecting the unprecedented speed and severity of job losses that initial estimates failed to capture. Conversely, the largest positive revision of **`r largest_positive$revision` thousand jobs in `r format(largest_positive$date, "%B %Y")`** occurred during the economic recovery, suggesting initial estimates underestimated the pace of recovery.
+```{r ref.label='largest-revisions', eval=FALSE,echo=TRUE}
+```
+
+
+```{r decade-negative-summary, include=FALSE}
+# Statistic 2: Fraction of positive vs negative revisions by decade
+decade_summary <- payroll_revisions_data |>
+  filter(!is.na(revision)) |>
+  group_by(decade) |>
+  summarise(
+    total = n(),
+    negative = sum(is_negative),
+    pct_negative = mean(is_negative) * 100,
+    .groups = "drop"
+  )
+decade_summary_DT<- datatable(decade_summary, 
+          colnames = c("Decade", "Total Months", "Negative Revisions", "% Negative"),
+          caption = "Distribution of Negative Revisions by Decade",
+          options = list(pageLength = 10, dom = 't')) |>
+  formatRound(columns = "pct_negative", digits = 1)
+```
+### 2. Fraction of Negative Revisions by Decade
+`r decade_summary_DT`
+**Interpretation:** The proportion of negative revisions varies substantially across decades. The 1990s showed the strongest upward bias with only 30.0% negative revisions, suggesting initial estimates consistently understated job growth during this economic expansion. The 2020s show a return to more balanced revisions at 53.0% negative.
+```{r ref.label='decade-negative-summary', eval=FALSE, echo=TRUE}
+```
+
+```{r revision-magnitude-decade, include=FALSE}
+# Statistic 3: Average revision magnitude over time
+revision_magnitude <- payroll_revisions_data |>
+  filter(!is.na(abs_revision)) |>
+  group_by(decade) |>
+  summarise(
+    mean_abs_revision = mean(abs_revision, na.rm = TRUE),
+    median_abs_revision = median(abs_revision, na.rm = TRUE),
+    .groups = "drop"
+  )
+revision_magnitude_DT <-datatable(revision_magnitude,
+          colnames = c("Decade", "Mean Absolute Revision", "Median Absolute Revision"),
+          caption = "Average Revision Magnitude by Decade (thousands of jobs)",
+          options = list(pageLength = 10, dom = 't')) |>
+  formatRound(columns = c("mean_abs_revision", "median_abs_revision"), digits = 1)
+
+```
+### 3. Average Revision Magnitude by Decade
+`r revision_magnitude_DT`
+**Interpretation:** The data shows a clear trend of improving accuracy from the 1970s through the 2010s, with mean absolute revisions declining from `r round(revision_magnitude$mean_abs_revision[1], 1)` thousand to `r round(revision_magnitude$mean_abs_revision[5], 1)` thousand jobs which is a `r round((1 - revision_magnitude$mean_abs_revision[5]/revision_magnitude$mean_abs_revision[1])*100, 1)`% improvement. However, this trend reversed dramatically in the 2020s, with revisions nearly tripling to `r round(revision_magnitude$mean_abs_revision[6], 1)` thousand jobs.
+```{r ref.label='revision-magnitude-decade', eval=FALSE, echo=TRUE}
+```
+
+```{r revision-percent-level, include=FALSE}
+# Statistic 4: Revision as percentage of employment level
+revision_pct_summary <- payroll_revisions_data |>
+  filter(!is.na(revision_pct_level)) |>
+  summarise(
+    overall_mean = mean(abs(revision_pct_level), na.rm = TRUE),
+    pre_2000 = mean(abs(revision_pct_level[!post_2000]), na.rm = TRUE),
+    post_2000 = mean(abs(revision_pct_level[post_2000]), na.rm = TRUE),
+    post_2020 = mean(abs(revision_pct_level[post_2020]), na.rm = TRUE)
+  )
+revision_pct_display <- data.frame(
+  Period = c("Overall", "Pre-2000", "Post-2000", "Post-2020"),
+  Revision_Pct = c(revision_pct_summary$overall_mean,
+                   revision_pct_summary$pre_2000,
+                   revision_pct_summary$post_2000,
+                   revision_pct_summary$post_2020)
+)
+
+revision_pct_DT<- datatable(revision_pct_display,
+          colnames = c("Period", "Revision as % of Employment"),
+          caption = "Average Absolute Revision Relative to Total Employment Level",
+          options = list(pageLength = 10, dom = 't')) |>
+  formatPercentage(columns = "Revision_Pct", digits = 3)
+```
+### 4. Revision as Percentage of Employment Level
+`r revision_pct_DT`
+**Interpretation:** When expressed as a percentage of total employment, revision magnitudes declined from `r sprintf("%.3f%%", revision_pct_summary$pre_2000*100)` pre-2000 to `r sprintf("%.3f%%", revision_pct_summary$post_2000*100)` post-2000, but increased again to `r sprintf("%.3f%%", revision_pct_summary$post_2020*100)` in the post-2020 period. This indicates that recent estimation challenges cannot be attributed solely to the larger size of the labor force.
+```{r ref.label='revision-percent-level', eval=FALSE, echo=TRUE}
+```
+
+```{r monthly-patterns, include=FALSE}
+# Statistic 5: Monthly patterns in revisions
+monthly_pattern <- payroll_revisions_data |>
+  filter(!is.na(abs_revision)) |>
+  group_by(month) |>
+  summarise(
+    mean_abs_revision = mean(abs_revision, na.rm = TRUE),
+    count = n(),
+    .groups = "drop"
+  ) |>
+  arrange(desc(mean_abs_revision))
+
+monthly_pattern_DT <- datatable(monthly_pattern,
+          colnames = c("Month", "Mean Absolute Revision", "Count"),
+          caption = "Average Absolute Revision by Month (thousands of jobs)",
+          options = list(pageLength = 12, dom = 't')) |>
+  formatRound(columns = "mean_abs_revision", digits = 1)
+```
+### 5. Seasonal Patterns in Revisions
+`r monthly_pattern_DT`
+**Interpretation:** Analysis by month reveals systematic patterns in revision accuracy. September (`r round(monthly_pattern$mean_abs_revision[1], 1)`k jobs), April (`r round(monthly_pattern$mean_abs_revision[2], 1)`k jobs), and March (`r round(monthly_pattern$mean_abs_revision[3], 1)`k jobs) show the largest average revisions. In contrast, February (`r round(monthly_pattern$mean_abs_revision[12], 1)`k jobs) and January (`r round(monthly_pattern$mean_abs_revision[11], 1)`k jobs) show the smallest revisions. The larger revisions in spring and fall may reflect challenges in capturing seasonal employment patterns.
+```{r ref.label='monthly-patterns', eval=FALSE, echo=TRUE}
+```
+
+```{r overall-statistics, include=FALSE}
+# Statistic 6: Overall revision statistics
+overall_stats <- payroll_revisions_data |>
+  filter(!is.na(revision)) |>
+  summarise(
+    mean_revision = mean(revision),
+    median_revision = median(revision),
+    mean_abs_revision = mean(abs_revision),
+    sd_revision = sd(revision),
+    pct_negative = mean(is_negative) * 100
+  )
+
+overall_stats_display <- data.frame(
+  Statistic = c("Mean Revision", "Median Revision", "Mean Absolute Revision", 
+                "Standard Deviation", "% Negative Revisions"),
+  Value = c(overall_stats$mean_revision,
+            overall_stats$median_revision,
+            overall_stats$mean_abs_revision,
+            overall_stats$sd_revision,
+            overall_stats$pct_negative)
+)
+
+overall_stats_DT<- datatable(overall_stats_display,
+          colnames = c("Statistic", "Value"),
+          caption = "Overall Revision Statistics (thousands of jobs unless noted)",
+          options = list(pageLength = 10, dom = 't')) |>
+  formatRound(columns = "Value", digits = 2)
+
+```
+### 6. Overall Revision Statistics
+`r overall_stats_DT`
+**Interpretation:** The positive mean revision of `r round(overall_stats$mean_revision, 2)` thousand jobs indicates a systematic upward bias in initial estimates, meaning that they tend to overstate employment growth slightly. With `r round(overall_stats$pct_negative, 1)`% of revisions being negative, there is a modest but consistent pattern of initial overestimation.
+```{r ref.label='overall-statistics',eval=FALSE, echo=TRUE}
+```
+
+## CES Visualizations
+```{r revisions-trend-plot, include=FALSE, warning=FALSE, message=FALSE}
+# Time series of revisions with trend
+revisions_trend_plot <- ggplot(payroll_revisions_data |> filter(!is.na(revision)), 
+       aes(x = date, y = revision)) +
+    geom_col(aes(fill = revision > 0), alpha = 0.7) +
+    geom_line(alpha=.5)+
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+    geom_smooth(method="loess", se=TRUE, color="blue")+
+    scale_fill_manual(
+        values = c("TRUE" = "darkgreen", "FALSE" = "darkred"),
+        labels = c("Negative", "Positive"),
+        name = "Revision Sign"
+    ) + 
+    labs(
+        title = "CES Revisions Over Time (1979-2025)",
+        subtitle = "Difference between first and third estimates",
+        x = "Date",
+        y = "Revision (thousands of jobs)"
+    ) +
+    theme_minimal()+
+    theme(plot.title = element_text(face="bold", size=20),
+          plot.subtitle= element_text(size=15),
+          axis.title= element_text(size=15),
+          legend.position = "bottom",
+          legend.title = element_text(size=13),
+          legend.text = element_text(size=13),
+          axis.text= element_text(size=14))
+```
+
+```{r revisions-trend-print, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+print(revisions_trend_plot)
+```
+**Interpretation:** This time series shows the actual revisions month-by-month. Green lines are positive revisions (initial estimate was too low) and red lines are negative revisions (initial estimate was too high). There are clusters of red (negative revisions) during economic downturns such as 2001 (Dot-com bubble) and 2008-2009 (Great Recession). During recessions, initial models tend to be too optimistic, and the data is later revised down. The most dramatic feature of this time series a massive red spike during 2020 where jobs vanished faster than expected, followed immediately by massive green spikes where hiring rebounded faster than expected. The blue trend line hovers near zero for most of history, suggesting that over the long run, the errors tend to balance out.
+```{r ref.label='revisions-trend-plot', eval=FALSE, echo=TRUE}
+```
+
+```{r revision-distribution-plot, include=FALSE, warning=FALSE, message=FALSE}
+# Distribution of revisions by decade
+revisions_distribution_plot <- ggplot(payroll_revisions_data |> filter(!is.na(revision)), 
+             aes(x = factor(decade), y = revision)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Distribution of CES Revisions by Decade",
+    x = "Decade",
+    y = "Revision (thousands of jobs)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text= element_text(size=14)
+  )
+```
+```{r revision-distribution-print, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+print(revisions_distribution_plot)
+```
+**Interpretation:** The boxplots for the 2020s reflects the immense economic volatility caused by the COVID-19 pandemic, where lockdowns caused historic job losses (negative revisions) and reopenings caused historic hiring surges (positive revisions) that were difficult to predict. The boxplot for the 1970s is quite tall, and the median line is notably below zero. This suggests that in the 70s, initial estimates tended to be overly optimistic and were frequently revised downward. The 2010s boxplot appears to be the most accurate decade. The blue box is very short (compressed), and the whiskers are short. This indicates that revisions were small and consistent, suggesting the statistical modeling or data collection was very stable during this period.
+```{r ref.label='revision-distribution-plot', eval=FALSE, echo=TRUE}
+```
+
+```{r absolute-revision-trend-plot, include=FALSE, warning=FALSE, message=FALSE}
+# Absolute revision magnitude over time
+absolute_revision_trend_plot <- ggplot(payroll_revisions_data, aes(x = date, y = abs_revision)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_smooth(method = "loess", se = TRUE, color = "darkred") +
+  labs(
+    title = "Absolute Revision Magnitude Over Time",
+    subtitle = "How accurate are initial estimates?",
+    x = "Date",
+    y = "Absolute Revision (thousands of jobs)"
+  ) +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text= element_text(size=14)
+  )
+```
+```{r absolute-revision-trend-print, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+print(absolute_revision_trend_plot)
+```
+**Interpretation:** This scatter plot looks at the size of the error, ignoring whether the number was revised up or down. The "Golden Age" of Stability, 1990 to 2010, trend line (the dark red curve) dips and flattens out. During this period, the Bureau of Labor Statistics (BLS) became increasingly accurate, with revisions typically staying small (under 100k jobs). During the Covid Shock, extreme outliers on the right side show the pandemic's impact. The magnitude of errors exploded, reaching 600k+ jobs, as traditional economic models failed to account for lockdowns and reopening.
+```{r ref.label='absolute-revision-trend-plot', eval=FALSE, echo=TRUE}
+```
+
+```{r yearly-negative-plot, include=FALSE, warning=FALSE, message=FALSE}
+# Proportion of negative revisions by year
+yearly_negative <- payroll_revisions_data |>
+  filter(!is.na(revision)) |>
+  group_by(year) |>
+  summarise(
+    pct_negative = mean(is_negative) * 100,
+    .groups = "drop"
+  )
+
+negative_revisions_year_plot <- ggplot(yearly_negative, aes(x = year, y = pct_negative)) +
+  geom_line(color = "darkgreen", linewidth = 1) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 50, linetype = "dashed", color = "red") +
+  geom_smooth(method = "loess", se = TRUE, alpha = 0.2) +
+  labs(
+    title = "Percentage of Negative Revisions by Year",
+    subtitle = "Are initial estimates systematically biased?",
+    x = "Year",
+    y = "% of Months with Negative Revisions"
+  ) +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text= element_text(size=14)
+  )
+```
+```{r yearly-negative-print, echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+print(negative_revisions_year_plot)
+```
+**Interpretation:** This plot tracks the frequency of bad news. Essentially, in a given year, what percentage of the monthly reports had to be revised downward? The red dashed line represents a "neutral" year where half the revisions are up and half are down. Historically, the line fluctuates. It spiked in 2001 and 2008, confirming that during recessions, the government consistently overestimates job growth initially.
+```{r ref.label='yearly-negative-plot', eval=FALSE, echo=TRUE}
+```
+
+```{r test-1, include=FALSE}
+# Test 1: Has the fraction of negative revisions increased post-2000?
+negative_revisions_test <- payroll_revisions_data |>
+  filter(!is.na(revision)) |>
+  mutate(post_2000_char = if_else(post_2000, "Post-2000", "Pre-2000"))
+
+negative_revisions_result <- negative_revisions_test |>
+  prop_test(is_negative ~ post_2000_char,
+            order = c("Post-2000", "Pre-2000"),
+            alternative = "greater")
+
+average_revision_pre_2000 <- mean(negative_revisions_test$is_negative[!negative_revisions_test$post_2000]) |> round(3)
+average_revision_post_2000 <- mean(negative_revisions_test$is_negative[negative_revisions_test$post_2000]) |> round(3)
+average_revision_2000_p_value <- pull(negative_revisions_result, p_value) |> round(4)
+```
+
+```{r test-2, include=FALSE}
+# Test 2: Has the average absolute revision increased post-2020?
+absolute_revision_test <- payroll_revisions_data |>
+  filter(!is.na(abs_revision)) |>
+  mutate(post_2020_char = if_else(post_2020, "Post-2020", "Pre-2020"))
+
+absolute_revision_result <- absolute_revision_test |>
+  t_test(abs_revision ~ post_2020_char,
+         order = c("Post-2020", "Pre-2020"),
+         alternative = "greater")
+
+average_absolute_revision_pre_2020 <- mean(absolute_revision_test$abs_revision[!absolute_revision_test$post_2020]) |> round(1)
+average_absolute_revision_post_2020 <- mean(absolute_revision_test$abs_revision[absolute_revision_test$post_2020]) |> round(1)
+average_absolute_p_value <- pull(absolute_revision_result, p_value) |> round(4)
+```
+
+```{r test-3, include=FALSE}
+# Test 3: Is the average revision significantly different from zero?
+average_revision_significance_test <- payroll_revisions_data |>
+  filter(!is.na(revision)) |>
+  mutate(dummy = "all")
+
+# One-sample t-test comparing to zero
+average_revision_significance_result <- t.test(average_revision_significance_test$revision, mu = 0)
+
+average_revision <- mean(average_revision_significance_test$revision) |> round(2)
+average_revision_p_value <- average_revision_significance_result$p.value |> round(4)
+average_revision_95_CI_lower <- round(average_revision_significance_result$conf.int[1], 2) 
+average_revision_95_CI_upper <- round(average_revision_significance_result$conf.int[2], 2)
+```
+
+```{r test-4, include=FALSE}
+# Test 4: Are revisions larger when underlying change is large?
+revision_employment_test <- payroll_revisions_data |>
+  filter(!is.na(abs_revision), !is.na(large_level_change)) |>
+  mutate(change_size = if_else(large_level_change, "Large Change", "Small Change"))
+
+revision_employment_result <- revision_employment_test |>
+  t_test(abs_revision ~ change_size,
+         order = c("Large Change", "Small Change"),
+         alternative = "greater")
+
+average_absolute_revision_small_change <- mean(revision_employment_test$abs_revision[!revision_employment_test$large_level_change]) |> round(1)
+average_absolute_revision_large_change <- mean(revision_employment_test$abs_revision[revision_employment_test$large_level_change]) |> round(1)
+average_absolute_revision_P_value <- pull(revision_employment_result, p_value) |> round(4)
+```
+# Statistical Inference and Hypotheses Testing  
+## Test 1: Is the post-2000 proportion significantly greater than the pre-2000 proportion?
+   Fraction negative pre-2000: **`r round(mean(negative_revisions_test$is_negative[!negative_revisions_test$post_2000]),3)`**  
+   Fraction negative post-2000: **`r round(mean(negative_revisions_test$is_negative[negative_revisions_test$post_2000]),3)`**  
+   P-value: **`r round(pull(negative_revisions_result, p_value),4)`**  
+   **Conclusion:** `r if_else(pull(negative_revisions_result, p_value) < 0.05, "**Significant increase in negative revisions post-2000**","**No significant increase in negative revisions post-2000**")`  
+   **Interpretation:** The p-value of 0.1865 means there's about an 18.7% chance we'd see this difference (or larger) just due to random variation, even if there's no real change in the underlying tendency. Since this is well above the conventional significance threshold of 0.05 (5%), we conclude the increase is not statistically significant. While there is a slight increase in negative revisions post-2000 (4.1 percentage points), this could easily be due to chance rather than a systematic shift in how the BLS estimates employment.  
+```{r ref.label='test-1', eval=FALSE, echo=TRUE}
+```
+
+## Test 2: Is the post-2020 average significantly greater than the pre-2020 average?
+   Mean absolute revision pre-2020: **`r round(mean(absolute_revision_test$abs_revision[!absolute_revision_test$post_2020]),1)`**  
+   Mean absolute revision post-2020: **`r round(mean(absolute_revision_test$abs_revision[absolute_revision_test$post_2020]),1)`**  
+   P-value: **`r round(pull(absolute_revision_result, p_value),4)`**  
+   **Conclusion:** `r if_else(pull(absolute_revision_result, p_value) < 0.05,"**Significant increase in revision magnitude post-2020**","**No significant increase in revision magnitude post-2020**")`  
+   **Interpretation:** The p-value of 0.0102 (about 1%) means there's only a 1% chance we'd see this large of a difference if there was actually no real change in revision sizes. This is well below 0.05, so the result is statistically significant. Revisions have increased by 62% post-2020 (from 52.8k to 85.7k jobs), and this is highly unlikely to be due to chance alone. This is strong evidence that the accuracy of initial CES estimates has deteriorated since the pandemic. This could be due to: disrupted data collection during COVID-19, structural changes in the labor market (remote work, freelance economy), lower survey response rates.  
+```{r ref.label='test-2', eval=FALSE, echo=TRUE}
+```
+
+## Test 3: Are revisions centered around zero (unbiased), or do they consistently lean in one direction?
+   Mean revision: **`r round(mean(average_revision_significance_test$revision),2)`**  
+   P-value: **`r round(average_revision_significance_result$p.value,4)`**  
+   95% CI: **[`r round(average_revision_significance_result$conf.int[1], 2)`,`r round(average_revision_significance_result$conf.int[2], 2)`]**  
+   **Conclusion:** `r if_else(average_revision_significance_result$p.value < 0.05,"**Revisions are significantly different from zero (systematic bias exists)**", "**No evidence of systematic bias in revisions**")`  
+   **Interpretation:** The p-value of 0.0015 (0.15%) means there's only a 0.15% chance we'd see a mean this far from zero if the true mean was actually zero. This is highly statistically significant. The 95% confidence interval [4.3, 18.17] tells us we can be 95% confident the true average revision is somewhere between 4,300 and 18,170 jobs. Initial CES estimates systematically overstate employment growth by about 11,240 jobs per month on average. This isn't a huge bias (less than 0.01% of total employment), but it's consistent and statistically proven. Over a year, this accumulates to about 135,000 jobs of systematic overestimation.  
+```{r ref.label='test-3', eval=FALSE, echo=TRUE}
+```
+
+## Test 4: Are revisions larger when the month-to-month employment change is large (high volatility) versus small?  
+   Mean abs revision (small employment change): **`r round(mean(revision_employment_test$abs_revision[!revision_employment_test$large_level_change]),1)`**  
+   Mean abs revision (large employment change): **`r round(mean(revision_employment_test$abs_revision[revision_employment_test$large_level_change]),1)`**  
+   P-value: **`r round(pull(revision_employment_result, p_value),4)`**  
+   **Conclusion:** `r if_else(pull(revision_employment_result, p_value) < 0.05,"**Revisions ARE significantly larger when employment changes are large**","**No evidence that revisions are larger for large employment changes**")`  
+   **Interpretation:** The p-value of 0.0533 is just barely above the conventional 0.05 threshold. This is what statisticians call "marginally significant" or "suggestive but not conclusive". There's moderate evidence that revisions are larger during volatile months (about 16% larger), but we can't quite reach statistical certainty. Revision magnitude is not strongly predicted by employment volatility alone. Even during stable months, revisions can be large, and even during volatile months, revisions can be small. This suggests that factors beyond simple month-to-month variability drive revision size, such as: survey response rates and quality, timing of data collecting, structural economic changes, seasonal adjustment challenges.
+```{r ref.label='test-4', eval=FALSE, echo=TRUE}
+```
+
+# BLS Fact Check
+
+This fact-check examines two claims about Bureau of Labor Statistics (BLS) employment data and revisions. Using 45 years of historical data (1979-2025), we evaluate these claims against statistical evidence, applying the **PolitiFact Truth-O-Meter** scale:
+
+- **TRUE**: The statement is accurate and there's nothing significant missing
+- **MOSTLY TRUE**: The statement is accurate but needs clarification or additional information
+- **HALF TRUE**: The statement is partially accurate but leaves out important details or takes things out of context
+- **MOSTLY FALSE**: The statement contains an element of truth but ignores critical facts that would give a different impression
+- **FALSE**: The statement is not accurate
+- **PANTS ON FIRE**: The statement is not accurate and makes a ridiculous claim
+
+```{r president-party}
+# Create presidential party data for BLS Fact Check
+presidents_party <- tidyr::expand_grid(year=1979:2025, 
+                                       month = month.name, 
+                                       president = NA, 
+                                       party = NA) |> 
+    mutate(president = case_when(
+        (month == "January")  & (year == 1979) ~ "Carter",
+        (month == "February") & (year == 1981) ~ "Reagan",
+        (month == "February") & (year == 1989) ~ "Bush 41",
+        (month == "February") & (year == 1993) ~ "Clinton",
+        (month == "February") & (year == 2001) ~ "Bush 43",
+        (month == "February") & (year == 2009) ~ "Obama",
+        (month == "February") & (year == 2017) ~ "Trump I",
+        (month == "February") & (year == 2021) ~ "Biden",
+        (month == "February") & (year == 2025) ~ "Trump II",
+    )) |>
+    tidyr::fill(president) |>
+    mutate(party = if_else(president %in% c("Carter", "Clinton", "Obama", "Biden"), 
+                           "D", 
+                           "R"))
+
+# Join with combined data
+combined_data_party <- payroll_revisions_data |>
+  mutate(
+    year = year(date),
+    month = month(date, label = TRUE, abbr = FALSE)
+  ) |>
+  left_join(presidents_party, by = c("year", "month"))
+```
+---
+
+# Claim 1: "The Biden Administration Systematically Inflated Jobs Numbers"
+
+## The Claim
+
+**Source:** Representative claim based on composite of conservative commentary  
+
+**Statement:** *"The Biden administration's BLS consistently inflated jobs numbers to make the economy look better than it was. The massive downward revisions we've seen prove that the initial numbers were deliberately overstated to benefit Democrats politically."*
+
+**Date of Claim:** 2024-2025 (representative of ongoing commentary)
+
+---
+```{r biden-hypothesis, include=FALSE}
+# Compare Biden-era revisions to all other administrations
+biden_test_data <- combined_data_party |>
+  filter(!is.na(revision), !is.na(president)) |>
+  mutate(is_biden = if_else(president == "Biden", "Biden", "Other"))
+
+# Statistical test: Are Biden revisions different?
+biden_test <- biden_test_data |>
+  t_test(revision ~ is_biden,
+         order = c("Biden", "Other"),
+         alternative = "two.sided")
+  
+# Calculate key statistics
+biden_mean <- mean(biden_test_data$revision[biden_test_data$is_biden == "Biden"], na.rm = TRUE)
+other_mean <- mean(biden_test_data$revision[biden_test_data$is_biden == "Other"], na.rm = TRUE)
+biden_pval <- pull(biden_test, p_value)
+```
+## Fact Check Analysis
+
+### Hypothesis Test: Did Biden-Era Revisions Differ from Historical Patterns?
+
+Mean revision during Biden Administration: **`r round(biden_mean, 1)` thousand jobs**  
+Mean revision during all other administrations: **`r round(other_mean,1)` thousand jobs**  
+P-value: **`r round(biden_pval,4)`**   
+**Statistical conclusion:** `r if_else(biden_pval < 0.05,"**Recent revisions ARE significantly different**", "**Recent revisions are NOT significantly different**")`  
+**Interpretation:** The p-value of 0.514 means there's a 51.4% chance this difference is just random chance  
+
+### Key Statistics
+
+```{r biden-statistics1, include=FALSE}
+# Statistic 1: Revisions by administration
+admin_revisions <- combined_data_party |>
+  filter(!is.na(revision), !is.na(president)) |>
+  group_by(president, party) |>
+  summarise(
+    n_months = n(),
+    mean_revision = mean(revision),
+    mean_abs_revision = mean(abs_revision),
+    pct_negative = mean(is_negative) * 100,
+    .groups = "drop"
+  ) |>
+  arrange(desc(mean_revision))
+
+admin_revisions_dt <- datatable(admin_revisions,
+          colnames = c("President", "Party", "Months", "Mean Revision", 
+                      "Mean Abs Revision", "% Negative"),
+          caption = "Revisions by Presidential Administration",
+          options = list(pageLength = 15, searching=FALSE)) |>
+  formatRound(columns = c("mean_revision", "mean_abs_revision"), digits = 1) |>
+  formatRound(columns = "pct_negative", digits = 1)
+```
+
+```{r biden-statistics2, include=FALSE}
+# Statistic 2: Biden vs historical average
+biden_comparison <- combined_data_party |>
+  filter(!is.na(revision), !is.na(president)) |>
+  mutate(period = if_else(president == "Biden", "Biden Admin", "Historical Average")) |>
+  group_by(period) |>
+  summarise(
+    mean_revision = mean(revision),
+    median_revision = median(revision),
+    mean_abs_revision = mean(abs_revision),
+    .groups = "drop"
+  )
+
+biden_revisions_dt <- datatable(biden_comparison,
+          colnames = c("Period", "Mean Revision", "Median Revision", "Mean Abs Revision"),
+          caption = "Biden Administration vs Historical Average",
+          options = list(pageLength = 5, dom = 't', searching=FALSE)) |>
+  formatRound(columns = 2:4, digits = 1)
+
+```
+#### Statistic 1: Revisions by Presidential Administration
+`r admin_revisions_dt`
+This table displays that there is no partisan pattern. Democrats and Republicans all show positive revisions. Trump I actually shows negative revisions, meaning that initial estimates were too low.
+```{r ref.label='biden-statistics1', eval=FALSE, echo=TRUE}
+```
+#### Statistic 2: Biden Administration vs Historical Average
+`r biden_revisions_dt`
+This table shows that Biden's mean absolute revision was **73.6 thousand jobs**, which is higher than the historical average, however, several administrations had similar or worse accuracy, which reflects post-2020 data collection challenges, rather than political bias.  
+```{r ref.label='biden-statistics2', eval=FALSE, include=TRUE}
+```
+
+```{r biden-statistic3, include=FALSE}
+# Statistic 3: Systematic bias test across all administrations
+overall_bias <- combined_data_party |>
+  filter(!is.na(revision)) |>
+  summarise(
+    overall_mean = mean(revision),
+    overall_pval = t.test(revision, mu = 0)$p.value
+  )
+```
+
+#### Statistic 3: Overall Systematic Bias Test  
+Mean revision across all administrations: **`r round(overall_bias$overall_mean,2)` thousand jobs**  
+P-value: **`r round(overall_bias$overall_pval,4)`**  
+**Conclusion:** `r if_else(overall_bias$overall_pval < 0.05,"**SIGNIFICANT systematic upward bias exists across ALL administrations**","**No systematic bias**")`  
+**Interpretation:** The p-value of 0.0015 (highly significant) means the BLS systematically overestimates employment by about **11,000 jobs per month**, regardless of who's president This is a methodological issue, not political manipulation.
+```{r ref.label='biden-statistic3', eval=FALSE, echo=TRUE}
+```
+
+### Visualization 1: Revisions by Presidential Administration
+
+```{r biden-viz1, include=FALSE}
+# Box plot of revisions by administration
+biden_viz1 <- combined_data_party |>
+  filter(!is.na(revision), !is.na(president)) |>
+  ggplot(aes(x = reorder(president, year), y = revision, fill = party)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_fill_manual(values = c("D" = "blue", "R" = "red")) +
+  coord_flip() +
+  labs(
+    title = "Distribution of CES Revisions by Presidential Administration",
+    subtitle = "Biden revisions are not uniquely large or systematically positive",
+    x = "President",
+    y = "Revision (thousands of jobs)",
+    fill = "Party"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+```{r biden-viz1-print, echo=FALSE}
+print(biden_viz1)
+```
+**Interpretation:** Biden's box (blue) is centered slightly above zero, similar to Clinton, Obama, Bush 41. The spread (width of the box) is comparable to other administrations. Biden's revisions are not uniquely large or systematically manipulated compared to history.
+```{r ref.label='biden-viz1', eval=FALSE, echo=TRUE}
+```
+
+### Visualization 2: Time Series with Recent Period Highlighted
+
+```{r biden-viz2, include=FALSE}
+# Time series with post-2020 period highlighted
+biden_viz2 <- combined_data_party |>
+  filter(!is.na(revision)) |>
+  mutate(is_recent = year >= 2020) |>
+  ggplot(aes(x = date, y = revision)) +
+  geom_line(alpha = 0.3) +
+  geom_point(aes(color = is_recent, size = is_recent, alpha = is_recent)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "darkblue"),
+                     labels = c("Pre-2020", "Post-2020")) +
+  scale_size_manual(values = c("FALSE" = 0.5, "TRUE" = 2),
+                    labels = c("Pre-2020", "Post-2020")) +
+  scale_alpha_manual(values = c("FALSE" = 0.3, "TRUE" = 1),
+                     labels = c("Pre-2020", "Post-2020")) +
+  labs(
+    title = "CES Revisions Over Time: Recent Period in Context",
+    subtitle = "Post-2020 revisions (blue) show increased volatility, not systematic bias",
+    x = "Date",
+    y = "Revision (thousands of jobs)",
+    color = NULL,
+    size = NULL,
+    alpha = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+```{r biden-viz2-print, echo=FALSE}
+print(biden_viz2)
+```
+**Interpretation:** The blue points (post-2020) show much higher volatility in revisions. But they're not systematically positive as they go both up and down. The massive outliers are the COVID period (March 2020: -672k; November 2021: +437k). This shows increased uncertainty, not bias.
+```{r ref.label='biden-viz2', eval=FALSE, echo=TRUE}
+```
+## The Verdict
+
+**Rating: MOSTLY FALSE**
+
+**Why:**
+
+1. **Statistical Evidence Shows No Biden-Specific Bias**: Our hypothesis test found **no statistically significant difference** between Biden-era revisions (mean: `r round(biden_mean, 1)`k) and revisions during other administrations (mean: `r round(other_mean, 1)`k), with p-value = `r round(biden_pval, 3)`.
+
+2. **Systematic Bias Exists Across ALL Administrations**: The data reveals a systematic upward bias of approximately 11.2 thousand jobs per month (p = 0.0015) that has existed consistently across **both Democratic and Republican administrations** for 45 years. This is not a Biden-specific phenomenon.
+
+3. **Biden Revisions Are Not Unusually Large**: Looking at mean absolute revisions by administration, Biden's period shows typical revision magnitudes compared to historical patterns. Several Republican administrations (Reagan, Bush 43, Trump I) had comparable or higher average revisions.
+
+4. **The Claim Contains a Kernel of Truth About Post-2020**: There IS a real increase in revision magnitudes post-2020 (p = 0.01), but this began during the Trump administration with the COVID-19 pandemic and reflects data collection challenges that transcend any single administration.
+
+**What's Missing**: The claim ignores that the upward bias in initial estimates is a long-standing statistical artifact of the BLS methodology, not political manipulation. Survey timing, birth-death modeling, and response patterns create this bias regardless of which party controls the White House.
+
+---
+
+# Claim 2: "Employment Growth Was Stronger Under Trump Than Biden"
+
+## The Claim
+
+**Source:** Fictional Politician (Representative Claim)
+
+**Statement:** *"When you look at the real numbers—not the fake news—employment growth was much stronger during my administration than under Sleepy Joe. The BLS data proves it. We created more jobs and the revisions show our numbers were more accurate."*
+
+**Date of Claim:** 2024 (Hypothetical campaign statement)
+
+---
+
+## Fact Check Analysis
+
+### Hypothesis Test: Employment Levels and Growth Rates
+
+```{r trump-biden-comparison}
+
+pres1 <- "Trump I"
+pres2 <- "Biden"
+comparison_presidents <- c(pres1, pres2)
+# Compare employment levels and growth
+trump_biden_data <- combined_data_party |>
+  filter(president %in% comparison_presidents, !is.na(level)) |>
+  group_by(president) |>
+  mutate(
+    employment_growth = level - lag(level),
+    pct_growth = (level / lag(level) - 1) * 100
+  ) |>
+  ungroup()
+```
+
+```{r trump-biden-test1, include=FALSE}
+# Test 1: Average monthly job growth
+growth_test <- trump_biden_data |>
+  filter(!is.na(employment_growth)) |>
+  t_test(employment_growth ~ president,
+         order = comparison_presidents,
+         alternative = "two.sided")
+
+average_monthly_growth_trump <- round(mean(trump_biden_data$employment_growth[trump_biden_data$president == pres1], na.rm = TRUE),1)
+average_monthly_growth_biden <- round(mean(trump_biden_data$employment_growth[trump_biden_data$president == pres2], na.rm = TRUE),1)
+average_monthly_growth_p_value <- round(pull(growth_test, p_value), 4)
+```
+
+```{r trump-biden-test2, include=FALSE}
+# Test 2: Revision accuracy comparison
+revision_test <- trump_biden_data |>
+  filter(!is.na(abs_revision)) |>
+  t_test(abs_revision ~ president,
+         order = comparison_presidents,
+         alternative = "two.sided")
+
+average_abs_rev_trump <- round(mean(trump_biden_data$abs_revision[trump_biden_data$president == pres1], na.rm = TRUE),1)
+average_abs_rev_biden <- round(mean(trump_biden_data$abs_revision[trump_biden_data$president == pres2], na.rm = TRUE),1)
+average_abs_rev_p_value <- round(pull(revision_test, p_value), 4)
+```
+
+Average monthly job growth (Trump I): **`r average_monthly_growth_trump` thousand jobs**  
+Average monthly job growth (Biden): **`r average_monthly_growth_biden` thousand jobs**  
+Average monthly growth p-value: **`r average_monthly_growth_p_value`**   
+**Statistical Conclusion:** `r if_else(average_monthly_growth_p_value < 0.05,"**Significant difference in growth rates**", "**No significant difference in growth rates**")`    
+**Interpretation:** The p-value of `r average_monthly_growth_p_value` means there's a `r round(average_monthly_growth_p_value * 100, 2)`% chance this difference is just random chance. This doesn't mean the difference isn't real, rather it means the high variability (mostly from COVID) makes it hard to detect a clear signal. This is why comparing raw averages across COVID is statistically invalid.
+
+```{r ref.label='trump-biden-test1', eval=FALSE, echo=TRUE}
+```
+
+Average absolute revision (Trump I): **`r average_abs_rev_trump` thousand jobs**  
+Average absolute revision (Biden): **`r average_abs_rev_biden` thousand jobs**  
+Average absolute revision p-value: **`r average_abs_rev_p_value`**  
+**Statistical Conclusion:** `r if_else(average_abs_rev_p_value < 0.05, "**Significant difference in revision accuracy**", "**No significant difference in revision accuracy**")`  
+**Interpretation:** The p-value of `r round(average_abs_rev_p_value,4)` indicates `r if_else(average_abs_rev_p_value < 0.05, "a statistically significant difference", "no statistically significant difference")` in revision accuracy between the two administrations. This suggests that one administration's initial job estimates were `r if_else(average_abs_rev_p_value < 0.05, "more accurate than the other's", "not significantly more accurate than the other's")`. Biden's revisions ARE larger on average. We cannot conclude Biden's estimates were less accurate. Both administrations are higher than the historical average due to COVID disruptions, remote work, and survey challenges.
+```{r ref.label='trump-biden-test2', eval=FALSE, echo=TRUE}
+```
+
+### Key Statistics
+
+```{r trump-statistic1, include=FALSE}
+# Statistic 1: Total job creation
+job_creation_summary <- combined_data_party |>
+  filter(president %in% comparison_presidents) |>
+  group_by(president) |>
+  summarise(
+    start_level = first(level, order_by = date),
+    end_level = last(level, order_by = date),
+    total_change = end_level - start_level,
+    months = n(),
+    avg_monthly_change = total_change / months,
+    .groups = "drop"
+  )
+
+job_creation_dt <- datatable(job_creation_summary,
+          colnames = c("President", "Start Level", "End Level", 
+                      "Total Change", "Months", "Avg Monthly"),
+          caption = "Total Employment Change by Administration",
+          options = list(pageLength = 5, dom = 't')) |>
+  formatRound(columns = c(2, 3, 4, 6), digits = 0)
+```
+#### Statistic 1: Total Employment Change
+`r job_creation_dt`
+Trump started in February 2017 at **145,848 thousand jobs (145.8 million)** and ended January 2021 at **142,913 thousand jobs (142.9 million)** with a **net loss of 2,935 thousand jobs (2.9 million jobs)**.  
+Biden started February 2021 at **143,422 thousand jobs (143.4 million)** and ended January 2025 at **159,053 thousand jobs (159.1 million)** with a **net gain of 15,631 thousand jobs (15.6 million jobs)**.  
+
+**Critical context:**  
+- Trump left office with employment **BELOW** where he started  
+- Biden left office with employment **ABOVE** pre-pandemic peaks  
+- Pre-COVID peak was **~153 million** (Feb 2020)  
+- Biden reached 159 million (6 million jobs higher than pre-pandemic)  
+
+But this comparison is **misleading** because:   
+- Trump inherited a strong, growing economy  
+- Trump faced an **unprecedented crisis** (COVID)  
+- Biden inherited a recovering economy  
+- Biden benefited from **"bounce-back"** growth  
+```{r ref.label='trump-statistic1', eval=FALSE, echo=TRUE}
+```
+
+```{r trump-statistic2, include=FALSE}
+# Statistic 2: Excluding COVID period
+trump_biden_no_covid <- combined_data_party |>
+  filter(president %in% comparison_presidents,
+         !(date >= "2020-02-01" & date <= "2020-04-01")) |>
+  group_by(president) |>
+  summarise(
+    avg_monthly_growth = mean(level - lag(level), na.rm = TRUE),
+    median_monthly_growth = median(level - lag(level), na.rm = TRUE),
+    months = n(),
+    .groups = "drop"
+  )
+
+trump_biden_no_covid_dt <- datatable(trump_biden_no_covid,
+          colnames = c("President", "Avg Monthly Growth", 
+                      "Median Monthly Growth", "Months"),
+          caption = "Monthly Growth Excluding COVID Crisis (Feb-Apr 2020)",
+          options = list(pageLength = 5, dom = 't')) |>
+  formatRound(columns = 2:3, digits = 1)
+```
+#### Statistic 2: Monthly Growth Excluding COVID Crisis
+`r trump_biden_no_covid_dt`
+For Trump I:  
+- Average: **-66.7k** (still negative!)  
+- Median: **204.0k** (positive!)  
+The average is still dragged down by the COVID recovery months (which had huge volatility)  
+This tells us that most Trump months had solid growth, but COVID created **extreme outliers**  
+
+For Biden:  
+- Average: **332.6k**  
+- Median: **246.0k**  
+- More consistent  
+```{r ref.label='trump-statistic2', eval=FALSE, echo=TRUE}
+```
+
+```{r trump-statistic3, include=FALSE}
+# Statistic 3: Revision accuracy
+revision_accuracy <- combined_data_party |>
+  filter(president %in% comparison_presidents, !is.na(revision)) |>
+  group_by(president) |>
+  summarise(
+    mean_revision = mean(revision),
+    mean_abs_revision = mean(abs_revision),
+    pct_negative = mean(is_negative) * 100,
+    largest_revision = max(abs_revision),
+    .groups = "drop"
+  )
+
+revision_accuracy_dt <- datatable(revision_accuracy,
+          colnames = c("President", "Mean Revision", "Mean Abs Revision",
+                      "% Negative", "Largest Revision"),
+          caption = paste("Revision Patterns -", pres1, "vs", pres2),
+          options = list(pageLength = 5, dom = 't')) |>
+  formatRound(columns = 2:5, digits = 1)
+```
+#### Statistic 3: Revision Patterns
+
+Mean Revision:  
+Biden: **+21.3k** (initial estimates tend to understate jobs by 21.3k)  
+Trump I: **-6.9k** (initial estimates tend to overstate jobs by 6.9k)  
+
+Biden's initial numbers were typically **revised UP** (jobs better than first reported)  
+Trump's initial numbers were typically **revised DOWN** (jobs worse than first reported)  
+Neither pattern suggests manipulation  as **both are small** compared to the 150+ million total jobs  
+
+Mean Absolute Revision (accuracy):    
+Biden: **73.6k** (average error size, ignoring direction)  
+Trump: **60.9k**  
+Both are higher than historical average (55.1k)  
+
+% Negative:  
+Both administrations: 47.9% of revisions were negative  
+This is **almost perfectly balanced** (50% would be no bias)  
+
+Largest Revision:  
+Trump I: **672k** (March 2020 - the COVID collapse month)  
+Biden: **437k** (November 2021 - the recovery period)  
+These are the two **largest revisions in the entire 45-year dataset**  
+```{r ref.label='trump-statistic3', eval=FALSE, echo=TRUE}
+```
+
+### Visualization 1: Employment Levels Over Time
+
+```{r trump-viz1, include=FALSE}
+trump_employment_plot <- combined_data_party |>
+  filter(president %in% comparison_presidents) |>
+  ggplot(aes(x = date, y = level, color = president)) +
+  geom_line(linewidth = 1.2) +
+  {if("Trump I" %in% comparison_presidents) 
+    geom_vline(xintercept = as.Date("2020-03-01"), 
+               linetype = "dashed", color = "red", linewidth = 0.8)} +
+  {if("Trump I" %in% comparison_presidents)
+    annotate("text", x = as.Date("2020-03-01"), y = max(trump_biden_data$level, na.rm=TRUE) * 0.95, 
+             label = "COVID-19\nPandemic", hjust = -0.1, size = 3.5)} +
+  scale_color_manual(values = c("Trump I" = "red", "Biden" = "blue", 
+                                "Trump II" = "darkred", "Obama" = "darkblue")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = paste("Total Non-Farm Employment:", pres1, "vs", pres2),
+    subtitle = "Comparing employment levels across administrations",
+    x = "Date",
+    y = "Employment Level (thousands)",
+    color = "President"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+```{r trump-employment-plot, echo=FALSE}
+print(trump_employment_plot)
+```
+
+This is a line graph showing total employment (in thousands) on the y-axis and time on the x-axis.
+
+The Red Line (Trump I: 2017-2021):
+
+February 2017 to February 2020:  
+- Steady, consistent upward slope  
+- Goes from ~146 million to ~153 million jobs  
+- This represents about 7 million jobs added over 3 years  
+- Growth rate: **~195k jobs/month** (solid, comparable to Obama's late term)  
+
+February 2020 (marked with red dashed line):  
+- "COVID-19 Pandemic" label  
+- This is when everything changes  
+ 
+March-April 2020:  
+- The line **plummets** vertically  
+- Goes from ~153 million to ~131 million  
+- That's a **loss of 22 million jobs in 2 months**  
+- The **steepest employment drop** in recorded history  
+- Makes the Great Depression look gradual by comparison  
+
+May 2020 - January 2021:  
+- Line begins climbing back up  
+- Reaches ~143 million by the end of Trump's term  
+- **Recovered about 12 million of the 22 million lost**  
+- Still 10 million jobs short of pre-pandemic peak  
+
+The Blue Line (Biden: 2021-2025):
+
+February 2021 (start of Biden term):  
+- Begins at ~143 million jobs  
+- Inherits an economy still recovering from COVID  
+
+February 2021 - mid-2022:  
+- Steep upward slope  
+- This is "recovery growth" - filling in the COVID hole  
+- By mid-2022, crosses 153 million (pre-pandemic peak recovered)  
+
+Mid-2022 - January 2025:  
+- Continued growth, but at slower pace  
+- Reaches 159 million jobs  
+- This is 6 million jobs higher than the pre-pandemic peak  
+- This is the **highest employment level** in American history  
+
+This visualization shows that  
+- Trump presided over growth, then catastrophic loss, then partial recovery  
+- Biden presided over continued recovery plus additional growth beyond pre-COVID  
+- In absolute terms, Biden ended higher (159M vs Trump's 143M)  
+- But Biden started from a lower point (143M vs Trump's 146M)  
+- And Biden benefited from recovery dynamics  
+```{r ref.label='trump-viz1', eval=FALSE, echo=TRUE}
+```
+
+### Visualization 2: Monthly Job Growth Comparison
+
+```{r trump-viz2, include=FALSE}
+monthly_job_growth_plot <- combined_data_party |>
+  filter(president %in% comparison_presidents) |>
+  mutate(
+    monthly_change = level - lag(level),
+    is_covid_period = (date >= "2020-02-01" & date <= "2020-05-01")
+  ) |>
+  filter(!is.na(monthly_change)) |>
+  ggplot(aes(x = date, y = monthly_change, fill = president)) +
+  geom_col(alpha = 0.8) +
+  geom_hline(yintercept = 0, linewidth = 0.5) +
+  scale_fill_manual(values = c("Trump I" = "red", "Biden" = "blue", 
+                               "Trump II" = "darkred", "Obama" = "darkblue")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = paste("Monthly Employment Change:", pres1, "vs", pres2),
+    subtitle = "Comparing monthly job growth patterns",
+    x = "Date",
+    y = "Monthly Change (thousands of jobs)",
+    fill = "President"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+```{r monthly-job-growth-plot, echo=FALSE}
+print(monthly_job_growth_plot)
+```
+This is a bar chart showing month-to-month employment changes.  
+Trump Period (Red bars: 2017-2021):
+
+2017-2019:  
+- Small positive red bars  
+- All clustered around 0-300 thousand range  
+- Consistent, steady growth  
+- Typical of late business cycle expansion  
+
+Early 2020:  
+- Still positive small bars  
+ 
+March-April 2020:  
+- **MASSIVE negative red bar**    
+- The bar extends to nearly -20,000 (that's -20 million jobs in April 2020 alone)  
+- March was about -1.4 million  
+- April was about -20.7 million  
+- May was about +2.7 million (start of recovery)  
+- This is the **COVID collapse**  
+
+Mid-2020 to January 2021:  
+- Large positive red bars (500k-4,000k range)  
+- These are **"recovery months"** - jobs coming back  
+- Still under Trump, but recovering from the trough  
+
+Biden Period (Blue bars: 2021-2025):
+
+2021:  
+- Large positive blue bars (500k-1,500k range)  
+- Strong recovery growth continuing  
+- Larger than typical pre-COVID months  
+
+2022-2024:  
+- Smaller positive blue bars (100k-500k range)  
+- More "normal" growth as recovery completes  
+- **Consistent positive growth**  
+
+What the visualization proves:  
+- The COVID loss is so massive it makes everything else look tiny   
+- **Trump's pre-COVID growth looks identical to Biden's late-term growth**  
+- Trump's recovery phase (red bars late 2020) looks similar to Biden's early phase (blue bars 2021)  
+- The key difference is Trump's term included the collapse while Biden's didn't  
+```{r ref.label='trump-viz2', eval=FALSE, echo=TRUE}
+```
+
+### Fair Comparison
+
+```{r pre-covid-analysis, include=FALSE}
+# Fair comparison adjusting for COVID if Trump I is in comparison
+if(pres1 == "Trump I" || pres2 == "Trump I") {
+  fair_comparison <- combined_data_party |>
+    filter(
+      (president == "Trump I" & date < "2020-02-01") |
+      (president %in% comparison_presidents & president != "Trump I")
+    ) |>
+    group_by(president) |>
+    summarise(
+      avg_monthly_growth = mean(level - lag(level), na.rm = TRUE),
+      total_months = n(),
+      .groups = "drop"
+    )
+  
+pre_covid_analysis_dt <- datatable(fair_comparison,
+            colnames = c("Period", "Avg Monthly Growth", "Months"),
+            caption = "Fair Comparison: Trump Pre-COVID vs Other Period",
+            options = list(pageLength = 5, dom = 't')) |>
+    formatRound(columns = 2, digits = 1)
+} else {
+  cat("COVID adjustment not needed for this comparison\n")
+}
+```
+`r pre_covid_analysis_dt`
+
+This isolate Trump's pre-COVID performance (Feb 2017 - Jan 2020) and compares it to Biden's full term by removing the COVID distortion.
+
+Trump pre-COVID:  
+- 176.7k jobs/month average  
+- 36 months of data  
+- Total: ~6.4 million jobs added  
+
+Biden full term:  
+- 332.6k jobs/month average  
+- 48 months of data  
+- Total: ~16 million jobs added  
+
+This comparison still isn't apples-to-apples because:
+
+1. Different economic contexts:   
+- Trump pre-COVID: late-stage expansion (9th-11th year of recovery from 2008)   
+- Biden: recovery phase + new expansion   
+- Recovery phases typically show faster growth    
+
+2. Different starting points:  
+- Trump: inherited strong, stable economy  
+- Biden: inherited partially-recovered, volatile economy  
+
+3. Different base effects:  
+- Trump: adding jobs to a high base (146M to 153M)  
+- Biden: adding jobs from lower base (143M to 159M)  
+- Percentage growth rates would show different story   
+```{r ref.label='pre-covid-analysis', eval=FALSE, echo=TRUE}
+```
+
+## The Verdict
+
+**Rating: FALSE**
+
+**Why:**
+
+1. **Job Growth Comparison Depends on Period**: Statistical analysis shows `r pres2` averaged `r average_monthly_growth_biden` thousand jobs per month compared to `r pres1`'s `r average_monthly_growth_trump` thousand. The comparison depends heavily on which administrations and time periods are being evaluated.
+
+2. **COVID-19 Creates Analytical Challenges**: If comparing periods that include the pandemic, the catastrophic job losses and subsequent recovery create massive distortions that make simple comparisons misleading without proper statistical adjustment.
+
+3. **Revisions Show Post-2020 Data Quality Issues**: Both recent administrations experienced larger revisions than historical averages (mean absolute revision `r pres1`: `r average_abs_rev_trump`k; `r pres2`: `r average_abs_rev_biden`k), reflecting data quality challenges rather than differential accuracy.
+
+4. **Context Matters for Employment Levels**: Total employment changes must account for inherited economic conditions, economic shocks, and the business cycle phase. Raw comparisons without these controls are statistically invalid.
+
+5. **Long-Term Patterns More Informative**: Pre-pandemic growth rates across modern administrations show relatively similar performance once business cycle effects are controlled, with variation driven more by economic conditions than administration policies alone.
+
+**What's True**: Different administrations do show different job growth patterns, and data quality has varied over time.
+
+**What's False**: The claim that simple employment comparisons prove superior performance without accounting for economic context, inherited conditions, and unprecedented shocks like COVID-19. Statistical analysis requires appropriate controls and context.
+
+---
+
+# Conclusions
+
+## Summary of Findings
+
+Both claims examined contain significant distortions of the statistical evidence:
+
+**Claim 1 (Biden Inflation of Numbers)**: The evidence shows a long-standing systematic bias in BLS initial estimates that predates the Biden administration by decades and exists across both parties. While post-2020 revisions are larger, this reflects pandemic-era data challenges, not political manipulation.
+
+**Claim 2 (Trump vs Biden Growth)**: Simple comparisons of job growth between these administrations are rendered nearly meaningless by the COVID-19 pandemic. More sophisticated analysis shows comparable performance in non-crisis periods, with Biden overseeing a recovery that exceeded pre-pandemic employment levels.
+
+## Key Takeaways
+
+1. **Systematic Bias is Structural, Not Political**: The upward bias in initial CES estimates (mean: +11.2k jobs/month, p = 0.0015) exists across all administrations and reflects BLS methodology, not political interference.
+
+2. **Post-2020 Accuracy Declined for Everyone**: Both Trump I and Biden administrations experienced significantly larger revisions than historical norms (p = 0.01), indicating data quality challenges that transcend partisan control.
+
+3. **Context Matters**: Economic comparisons require careful statistical analysis and appropriate controls. The COVID-19 pandemic created an unprecedented shock that makes naive comparisons misleading.
+
+4. **Data Integrity Remains Strong**: Despite politicized rhetoric, there is no statistical evidence of systematic partisan manipulation of BLS employment data. The patterns we observe are consistent with known methodological challenges in real-time economic measurement.
+
+# Computationally Intensive Statistic Inference 
+
+## Understanding Computationally-Intensive Statistical Inference: A Non-Technical Explanation
+
+Traditional statistical tests, like the t-tests we've used throughout this analysis, rely on mathematical formulas developed over a century ago. These formulas assume our data follows specific patterns such as being "normally distributed" (bell-shaped). But what happens when our data doesn't fit this assumption? Or when we want to test something unusual that doesn't have a set formula?
+
+This is where **computationally-intensive inference** comes in. Instead of relying on mathematical formulas, we use the power of modern computers to simulate what would happen in thousands of alternate realities.
+
+### The Core Idea: Learning from Reshuffling
+
+Imagine you're trying to determine whether a coin is fair. The traditional approach would involve complicated probability formulas. The computational approach is simpler: flip the coin 1,000 times and see what happens. If it lands on heads 900 times, you can be pretty confident something's without a formula.
+
+We apply this same logic to employment data. When we want to know if Biden-era revisions are different from historical patterns, we could:
+
+1. **Permutation Testing** (for comparing groups): Take all our revision data and randomly shuffle the labels "Biden" and "Other Administration" thousands of times. If the real difference we observed is larger than 95% of these random shuffles, we know it's unlikely to be due to chance.
+
+2. **Bootstrapping** (for measuring uncertainty): Take our sample of Biden-era revisions and randomly draw from it (with replacement) thousands of times to create new "bootstrap samples." This shows us the range of plausible values for the true average revision, without assuming anything about the data's distribution.
+
+### Why This Matters for Employment Data
+
+Employment revisions during COVID-19 don't follow normal patterns. We have massive outliers (-672,000 jobs in March 2020!), extreme volatility, and only a few years of post-pandemic data. Traditional formulas that assume smooth, bell-shaped data might give misleading results.
+
+Computational methods let us:  
+1. Handle unusual data without making unrealistic assumptions  
+2. See the full range of uncertainty, not just a single p-value  
+3. Test complex hypotheses that don't have traditional formulas  
+4. Visualize what "random chance" actually looks like for our specific data  
+
+**The tradeoff?**   
+These methods require thousands of calculations. Fortunately, modern computers can run 10,000 simulations in seconds which was impossible when these statistical formulas were first developed in the early 1900s.   
+
+## How Computational Inference Works: A Visual Guide
+```{r computational-inference-flowchart, echo=FALSE, fig.width=12, fig.height=10}
+# Create a visual flowchart showing the process
+create_flowchart <- function() {
+  # This creates a simplified visual representation
+  
+  # Set up plotting area
+  par(mar = c(1, 1, 3, 1))
+  plot(1, type="n", xlim=c(0, 10), ylim=c(0, 12), 
+       xlab="", ylab="", axes=FALSE, main="Computational Statistical Inference Workflow", 
+       cex.main=1.8, font.main=2)
+  
+  # Box styling function
+  draw_box <- function(x, y, width, height, label, col="lightblue") {
+    rect(x - width/2, y - height/2, x + width/2, y + height/2, 
+         col=col, border="black", lwd=2)
+    text(x, y, label, cex=0.9, font=2)
+  }
+  
+  # Arrow function
+  draw_arrow <- function(x1, y1, x2, y2, label="") {
+    arrows(x1, y1, x2, y2, lwd=2, length=0.15, col="darkblue")
+    if(label != "") {
+      mid_x <- (x1 + x2) / 2
+      mid_y <- (y1 + y2) / 2
+      text(mid_x + 0.5, mid_y, label, cex=0.8, col="darkred", font=3)
+    }
+  }
+  
+  # BOOTSTRAP PATH (LEFT SIDE)
+  text(2.5, 12.3, "BOOTSTRAP APPROACH", cex=1.2, font=2, col="darkgreen")
+  text(2.5, 11.8, "(Measuring Uncertainty)", cex=1, font=3, col="darkgreen")
+  
+  # Original data
+  draw_box(2.5, 11, 2.5, 0.8, "Original Data\n(n observations)", "lightgreen")
+  
+  # Resampling
+  draw_arrow(2.5, 10.6, 2.5, 9.8, "")
+  draw_box(2.5, 9.2, 2.5, 0.8, "Resample WITH\nreplacement", "lightgreen")
+  
+  # Bootstrap samples
+  draw_arrow(2.5, 8.8, 2.5, 7.9, "Repeat 10,000x")
+  draw_box(2.5, 7.4, 2.5, 0.8, "10,000 Bootstrap\nSamples", "lightgreen")
+  
+  # Calculate statistics
+  draw_arrow(2.5, 7, 2.5, 6.1, "")
+  draw_box(2.5, 5.6, 2.5, 0.8, "Calculate statistic\nfor each sample", "lightgreen")
+  
+  # Bootstrap distribution
+  draw_arrow(2.5, 5.2, 2.5, 4.3, "")
+  draw_box(2.5, 3.8, 2.5, 0.8, "Bootstrap\nDistribution", "lightgreen")
+  
+  # Confidence interval
+  draw_arrow(2.5, 3.4, 2.5, 2.5, "")
+  draw_box(2.5, 2, 2.5, 0.8, "95% CI:\n2.5th to 97.5th\npercentile", "lightgreen")
+  
+  # PERMUTATION PATH (RIGHT SIDE)
+  text(7.5, 12.3, "PERMUTATION APPROACH", cex=1.2, font=2, col="darkblue")
+  text(7.5, 11.8, "(Testing Hypotheses)", cex=1, font=3, col="darkblue")
+  
+  # Original data with groups
+  draw_box(7.5, 11, 2.5, 0.8, "Original Data\nGroup A vs Group B", "lightblue")
+  
+  # Shuffle labels
+  draw_arrow(7.5, 10.6, 7.5, 9.7, "")
+  draw_box(7.5, 9.2, 2.5, 0.8, "Randomly shuffle\ngroup labels", "lightblue")
+  
+  # Permuted samples
+  draw_arrow(7.5, 8.8, 7.5, 7.9, "Repeat 10,000x")
+  draw_box(7.5, 7.4, 2.5, 0.8, "10,000 Permuted\nDatasets", "lightblue")
+  
+  # Calculate differences
+  draw_arrow(7.5, 7, 7.5, 6.1, "")
+  draw_box(7.5, 5.6, 2.5, 0.8, "Calculate difference\nfor each permutation", "lightblue")
+  
+  # Null distribution
+  draw_arrow(7.5, 5.2, 7.5, 4.3, "")
+  draw_box(7.5, 3.8, 2.5, 0.8, "Null Distribution\n(if no real difference)", "lightblue")
+  
+  # P-value
+  draw_arrow(7.5, 3.4, 7.5, 2.5, "")
+  draw_box(7.5, 2, 2.5, 0.8, "P-value:\n% of permutations\nmore extreme", "lightblue")
+  
+  # Add example annotation
+  text(5, 1.1, "Example: If observed difference is larger than 9,500 of 10,000 permutations,\nthen p-value = 0.05 (only 5% chance under random shuffling)", 
+       cex=0.85, col="black", font=3)
+}
+
+create_flowchart()
+```
+
+**Understanding the Flowchart:**
+
+**Left Side (Bootstrap):** Used when we want to measure uncertainty about a single number ("What's the average revision?")  
+1. We repeatedly draw random samples from our data  
+2. Each sample is the same size as our original data, but some observations appear multiple times   
+3. We calculate our statistic for each bootstrap sample  
+4. The spread of these 10,000 statistics shows us the range of values  
+
+**Right Side (Permutation):** Used when we want to test if two groups are different ("Is Biden different from other administrations?")  
+1. We randomly shuffle which observations belong to which group  
+2. If groups truly don't differ, shuffling shouldn't change results much  
+3. We calculate the difference for each random shuffle  
+4. If our real observed difference is more extreme than 95% of shuffles, it's statistically significant  
+
+## Computational Inference Applied to Our Fact Checks
+
+Now let's apply these computationally-intensive methods to re-test our key claims.
+
+### Test 1: Mean Revision Across All Administrations (Bootstrap)
+
+**Question:** Is there systematic bias in BLS initial estimates?
+```{r bootstrap-mean-revision, include=FALSE}
+set.seed(42)  # For reproducibility
+
+# Bootstrap test for mean revision
+bootstrap_mean <- combined_data_party |>
+  filter(!is.na(revision)) |>
+  specify(response = revision) |>
+  generate(reps = 10000, type = "bootstrap") |>
+  calculate(stat = "mean")
+
+# Calculate 95% confidence interval
+ci_mean <- bootstrap_mean |>
+  get_confidence_interval(level = 0.95, type = "percentile")
+
+# Visualize
+bootstrap_mean_plot <- ggplot(bootstrap_mean, aes(x = stat)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7, color = "black") +
+  geom_vline(xintercept = mean(combined_data_party$revision, na.rm = TRUE), 
+             color = "red", linewidth = 1.5, linetype = "dashed") +
+  geom_vline(xintercept = ci_mean$lower_ci, 
+             color = "darkgreen", linewidth = 1, linetype = "dotted") +
+  geom_vline(xintercept = ci_mean$upper_ci, 
+             color = "darkgreen", linewidth = 1, linetype = "dotted") +
+  geom_vline(xintercept = 0, color = "black", linewidth = 1, alpha = 0.5) +
+  labs(
+    title = "Bootstrap Distribution of Mean Revision (10,000 resamples)",
+    subtitle = paste0("95% CI: [", round(ci_mean$lower_ci, 2), ", ", 
+                     round(ci_mean$upper_ci, 2), "] - Does NOT include zero"),
+    x = "Mean Revision (thousands of jobs)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+bootstrap_observed_mean <- round(mean(combined_data_party$revision, na.rm = TRUE), 2)
+bootstrap_CI_lower <- round(ci_mean$lower_ci, 2) 
+bootstrap_CI_upper <- round(ci_mean$upper_ci, 2)
+```
+```{r bootstrap-mean-revision-plot, echo=FALSE}
+print(bootstrap_mean_plot)
+```
+
+Bootstrap Results for Mean Revision:  
+Observed mean revision: **`r bootstrap_observed_mean` thousand jobs**  
+95% Confidence Interval: **[`r bootstrap_CI_lower`, `r bootstrap_CI_upper`]**  
+**Conclusion:** Since the CI does NOT include 0, **there IS significant systematic bias**   
+**Interpretation:** The bootstrap distribution shows 10,000 possible values for the mean revision if we could repeatedly sample from the population. The red dashed line is our observed mean (+11.24k jobs). The green dotted lines mark the 95% confidence interval. Since zero is NOT in this interval, we can be confident the true average revision is positive, which confirms the systematic upward bias that we found with the traditional t-test.  
+```{r ref.label='bootstrap-mean-revision', eval=FALSE, echo=TRUE}
+```
+
+### Test 2: Median Revision Post-2020 vs Pre-2020 (Permutation Test)
+
+**Question:** Has the TYPICAL revision size increased post-2020? (Using median instead of mean to reduce influence of COVID outliers)
+```{r permutation-median-revision, include=FALSE}
+set.seed(42)
+
+# Observed difference in medians
+obs_diff_median <- combined_data_party |>
+  filter(!is.na(abs_revision)) |>
+  mutate(period = if_else(post_2020, "Post-2020", "Pre-2020")) |>
+  group_by(period) |>
+  summarize(median_rev = median(abs_revision)) |>
+  summarize(diff = median_rev[period == "Post-2020"] - median_rev[period == "Pre-2020"]) |>
+  pull(diff)
+
+# Permutation test
+permutation_median <- combined_data_party |>
+  filter(!is.na(abs_revision)) |>
+  mutate(period = if_else(post_2020, "Post-2020", "Pre-2020")) |>
+  specify(abs_revision ~ period) |>
+  hypothesize(null = "independence") |>
+  generate(reps = 10000, type = "permute") |>
+  calculate(stat = "diff in medians", order = c("Post-2020", "Pre-2020"))
+
+# Calculate p-value
+p_value_median <- permutation_median |>
+  get_p_value(obs_stat = obs_diff_median, direction = "greater")
+
+# Visualize
+permutation_median_plot <- ggplot(permutation_median, aes(x = stat)) +
+  geom_histogram(bins = 50, fill = "coral", alpha = 0.7, color = "black") +
+  geom_vline(xintercept = obs_diff_median, 
+             color = "darkred", linewidth = 1.5, linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "black", linewidth = 1, alpha = 0.5) +
+  labs(
+    title = "Permutation Distribution: Difference in Median Revisions",
+    subtitle = paste0("Observed difference: ", round(obs_diff_median, 1), 
+                     "k jobs | P-value: ", round(p_value_median$p_value, 4)),
+    x = "Difference in Median Absolute Revision (Post-2020 minus Pre-2020)",
+    y = "Frequency",
+    caption = "Null hypothesis: No difference between periods (permutation under independence)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+permutation_observed_median <- round(obs_diff_median, 1)
+permutation_p_value <- round(p_value_median$p_value, 4)
+
+```
+
+```{r print-permutation, echo=FALSE}
+print(permutation_median_plot)
+```
+Permutation Test Results for Median Revision:  
+Observed difference in medians: **`r permutation_observed_median` thousand jobs**  
+P-value: **`r permutation_p_value`**   
+**Conclusion:** `r if_else(p_value_median$p_value < 0.05, "**SIGNIFICANT increase in typical revision size post-2020**","**No significant increase in typical revision size post-2020**")`.  
+**Interpretation:** This permutation test shows what would happen if we randomly shuffled the "Post-2020" and "Pre-2020" labels 10,000 times. The red dashed line is our actual observed difference. If it falls in the extreme tail (beyond 95% of random shuffles), we conclude the difference is real, not random.    
+```{r ref.label='permutation-median-revision', eval=FALSE, echo=TRUE}
+```
+
+### Test 3: Probability of Negative Revisions Biden vs Others (Permutation Proportion Test)
+
+**Question:** Are negative revisions more common under Biden than historically?
+```{r permutation-proportion-test, include=FALSE}
+set.seed(42)
+
+# Observed difference in proportions
+obs_diff_prop <- biden_test_data |>
+  group_by(is_biden) |>
+  summarize(prop_negative = mean(is_negative)) |>
+  summarize(diff = prop_negative[is_biden == "Biden"] - prop_negative[is_biden == "Other"]) |>
+  pull(diff)
+
+# Permutation test for proportions
+permutation_prop <- biden_test_data |>
+  specify(is_negative ~ is_biden, success = "TRUE") |>
+  hypothesize(null = "independence") |>
+  generate(reps = 10000, type = "permute") |>
+  calculate(stat = "diff in props", order = c("Biden", "Other"))
+
+# Calculate p-value (two-sided)
+p_value_prop <- permutation_prop |>
+  get_p_value(obs_stat = obs_diff_prop, direction = "two-sided")
+
+# Visualize
+permutation_prop_plot <- ggplot(permutation_prop, aes(x = stat)) +
+  geom_histogram(bins = 50, fill = "purple", alpha = 0.7, color = "black") +
+  geom_vline(xintercept = obs_diff_prop, 
+             color = "darkviolet", linewidth = 1.5, linetype = "dashed") +
+  geom_vline(xintercept = -obs_diff_prop, 
+             color = "darkviolet", linewidth = 1.5, linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "black", linewidth = 1, alpha = 0.5) +
+  labs(
+    title = "Permutation Distribution: Difference in Proportion of Negative Revisions",
+    subtitle = paste0("Observed difference: ", round(obs_diff_prop, 3), 
+                     " | P-value: ", round(p_value_prop$p_value, 4)),
+    x = "Difference in Proportion Negative (Biden minus Other Administrations)",
+    y = "Frequency",
+    caption = "Two-sided test: Biden could have more OR fewer negative revisions"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 13))
+
+
+biden_prop <- round(mean(biden_test_data$is_negative[biden_test_data$is_biden == "Biden"]),3)
+other_prop <- round(mean(biden_test_data$is_negative[biden_test_data$is_biden == "Other"]), 3)
+observed_prop_difference <- round(obs_diff_prop, 3)
+prop_p_value <- round(p_value_prop$p_value, 4)
+```
+
+```{r perm-prop-plot, echo=FALSE}
+print(permutation_prop_plot)
+```
+Permutation Test Results for Proportion of Negative Revisions:  
+Biden proportion negative: **`r biden_prop`**   
+Other administrations proportion negative: **`r other_prop`**   
+Observed difference in proportions: **`r observed_prop_difference`**  
+P-value: **`r prop_p_value`**   
+**Conclusion:** `r if_else(p_value_prop$p_value < 0.05, "**SIGNIFICANT difference in negative revision rates**","**No significant difference in negative revision rates**")`  
+**Interpretation:** This tests whether Biden has a different rate of negative revisions compared to all other administrations. The purple histogram shows the distribution of differences we'd see if we randomly shuffled the "Biden" label across all months. The observed difference (violet dashed line) falls well within the typical range of random shuffles, confirming no Biden-specific pattern.  
+```{r ref.label='permutation-proportion-test', eval=FALSE, echo=TRUE}
+```
+
+### Test 4: Comparison with Traditional Tests
+
+```{r comparison-table, include=FALSE}
+comparison_results <- data.frame(
+  Test = c(
+    "Mean Revision ≠ 0",
+    "Mean Revision ≠ 0",
+    "Median Revision Post-2020 > Pre-2020",
+    "Median Revision Post-2020 > Pre-2020",
+    "Biden Prop. Negative ≠ Others",
+    "Biden Prop. Negative ≠ Others"
+  ),
+  Method = c(
+    "Traditional t-test",
+    "Bootstrap 95% CI",
+    "Traditional (Wilcoxon would be used)",
+    "Permutation test",
+    "Traditional prop test",
+    "Permutation test"
+  ),
+  Statistic = c(
+    "t-statistic",
+    "CI includes 0?",
+    "Would use Wilcoxon",
+    "Permutation p-value",
+    "Chi-square test",
+    "Permutation p-value"
+  ),
+  Result = c(
+    paste0("p = ", round(average_revision_p_value, 4)),
+    paste0("CI: [", round(ci_mean$lower_ci, 2), ", ", round(ci_mean$upper_ci, 2), "]"),
+    "Not computed",
+    paste0("p = ", round(p_value_median$p_value, 4)),
+    paste0("p = ", pull(biden_test, p_value) |> round(4)),
+    paste0("p = ", round(p_value_prop$p_value, 4))
+  ),
+  Conclusion = c(
+    "Significant bias exists",
+    "Significant (0 not in CI)",
+    "—",
+    if_else(p_value_median$p_value < 0.05, "Significant increase", "Not significant"),
+    "Not significant",
+    "Not significant"
+  )
+)
+
+comparison_results_dt <- datatable(comparison_results,
+          caption = "Comparison of Traditional vs Computational Statistical Methods",
+          options = list(pageLength = 10, dom = 't'),
+          rownames = FALSE) |>
+  formatStyle(columns = 1:5, fontSize = '90%')
+```
+`r comparison_results_dt`
+```{r ref.label='comparison-table', eval=FALSE, echo=TRUE}
+```
+
+
+## Key Insights from Computational Methods
+
+### 1. **Confirmation of Traditional Results**
+
+The computational methods largely confirm our traditional parametric tests:   
+- **Systematic bias EXISTS**: Both the traditional t-test (p = 0.0015) and bootstrap CI [4.31, 18.20] agree  
+- **Post-2020 deterioration**: Permutation test on medians confirms increased revision sizes  
+- **No Biden-specific bias**: Permutation test confirms no unusual pattern under Biden  
+
+### 2. **Advantages of Computational Approaches**  
+
+**Better for COVID-era data:**  
+- Traditional tests assume normally distributed data  
+- COVID created massive outliers (-672k, +437k revisions)  
+- Permutation tests work regardless of distribution shape  
+- Bootstrap gives us the full range of uncertainty, not just one number  
+
+**More intuitive interpretation:**  
+- P-value from permutation: "In only 5% of random shuffles was the difference this large"  
+- Bootstrap CI: "We're 95% confident the true value falls in this range"  
+- No assumptions about theoretical distributions needed  
+
+**Robustness checks:**  
+- Using median instead of mean reduces COVID outlier influence  
+- Results are similar meaning that the conclusions are robust  
+  
+### 3. **Why Both Methods Matter**  
+ 
+**Traditional tests:**  
+- ✓ Fast to compute  
+- ✓ Well-understood by statisticians  
+- ✓ Allow direct comparison to published research  
+- ✗ Assume specific distributions  
+- ✗ Can be misleading with outliers  
+
+**Computational tests:**  
+- ✓ Work with any data shape  
+- ✓ Intuitively understandable  
+- ✓ Show full uncertainty  
+- ✗ Computationally intensive    
+- ✗ Can be slow with huge datasets  
+
+**For employment data with COVID:** Computational methods provide valuable confirmation that our conclusions don't depend on statistical assumptions that might be violated by extreme pandemic-era volatility.  
+
+## Conclusion: What Computational Methods Reveal  
+
+Our computational inference analysis provides three key contributions to the fact-check:  
+
+1. **Methodological Robustness**: By reaching the same conclusions using both traditional formulas and computer-intensive simulations, we can be confident our findings aren't artifacts of statistical assumptions. Even when we use medians which are less sensitive to outliers instead of means, the post-2020 deterioration remains evident.  
+
+2. **Transparency for Non-Experts**: The permutation test visualization shows that "random chance" is a powerful tool for communicating uncertainty to policymakers and the public who may not understand p-values from mathematical formulas.  
+
+3. **Appropriate for Unprecedented Data**: COVID-19 created economic patterns unlike anything in our 45-year dataset. Computational methods that don't assume "normal" patterns are particularly well-suited for this unprecedented era.  
+
+**Final verdict remains unchanged**: There is no evidence of political manipulation of employment data, but there IS clear evidence of systematic methodological bias (affecting all administrations equally) and deteriorating accuracy post-2020 (affecting all recent administrations).  
+
+The convergence of traditional and computational methods strengthens confidence in these conclusions, they both hold regardless of which statistical framework we use.  
