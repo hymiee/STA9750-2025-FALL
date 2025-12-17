@@ -1,0 +1,831 @@
+---
+title: "ADA-Compliant Park Accessibility in New York City: A Spatial Analysis Across Income Levels and Population Densities"
+author: "Hymie Israel"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    toc-expand: false
+    code-fold: true
+---
+```{r packages, include=FALSE}
+# LOAD & INSTALL REQUIRED PACKAGES
+if(!require("tidyverse")) install.packages("tidyverse")
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+if(!require("sf")) install.packages("sf")
+library(sf)
+
+if(!require("rvest")) install.packages("rvest")
+library(rvest)
+
+if(!require("httr2")) install.packages("httr2")
+library(httr2)
+
+if(!require("jsonlite")) install.packages("jsonlite")
+library(jsonlite)
+
+if(!require("htmltools")) install.packages("htmltools")
+library(htmltools)
+
+if(!require("DT")) install.packages("DT")
+library(DT)
+
+if(!require("knitr")) install.packages("knitr")
+library(knitr)
+
+if(!require("scales")) install.packages("scales")
+library(scales)
+
+if(!require("ggrepel")) install.packages("ggrepel")
+library(ggrepel)
+
+if(!require("gganimate")) install.packages("gganimate")
+library(gganimate)
+
+if(!require("ggtext")) install.packages("ggtext")
+library(ggtext)
+
+if(!require("gifski")) install.packages("gifski")
+library(gifski)
+
+if(!require("png")) install.packages("png")
+library(png)
+
+if(!require("gghighlight")) install.packages("gghighlight")
+library(gghighlight)
+
+if(!require("RcppRoll")) install.packages("RcppRoll")
+library(RcppRoll)
+
+if(!require("htmlwidgets")) install.packages("htmlwidgets")
+library(htmlwidgets)
+
+if(!require("leaflet")) install.packages("leaflet")
+library(leaflet)
+
+if(!require("RColorBrewer")) install.packages("RColorBrewer")
+library(RColorBrewer)
+
+if(!require("purrr")) install.packages("purrr")
+library(purrr)
+
+if(!require("infer")) install.packages("infer")
+library(infer)
+```
+
+# Introduction
+Access to parks and recreational facilities is a **fundamental component of urban quality of life,** particularly for individuals with disabilities who rely on accessible infrastructure to participate in outdoor activities. The Americans with Disabilities Act (ADA) **mandates** that public facilities, including parks, provide **reasonable accommodations to ensure equal access.** However, compliance and implementation vary significantly across urban landscapes, raising critical questions about spatial equity in accessibility infrastructure.  
+
+This analysis investigates the **distribution of ADA-compliant park facilities** across New York City's 59 community boards, examining whether accessibility varies systematically with socioeconomic factors. The central research question asks: How does ADA accessibility of parks vary across boroughs and neighborhoods with different income levels and population densities? Understanding these patterns is **essential for identifying communities underserved by accessible infrastructure** and informing equitable resource allocation in urban park systems.  
+
+# Data Acquisition  
+
+Data acquisition leverages the NYC Open Data platform's Socrata API, implementing robust error handling and retry mechanisms to ensure reliable downloads. Two primary datasets are acquired programmatically:
+
+The `download_parks_properties()` function implements industry-standard API best practices including user-agent identification, timeout management, and automatic retry logic. Similarly, `download_accessible_facilities()` acquires the complete directory of ADA-compliant facilities and programs.
+
+### Spatial Data and Demographics  
+Community board boundaries and demographic data are acquired from official NYC sources:  
+
+The community boards shapefile from NYC Department of City Planning provides precise geographic boundaries for all 71 community districts. Demographic data sourced from American Community Survey provides median household income and total population at the community board level, ensuring consistency in geographic units across all analyses.    
+
+```{r data-acquisition, include=FALSE}
+# NYC Parks Properties Download Function
+download_parks_properties <- function(output_dir = "data/Group Project", 
+                                       filename = "nyc_parks_properties.csv") {
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  url <- "https://data.cityofnewyork.us/resource/enfh-gkve.csv?$limit=50000"
+  
+  tryCatch({
+    req <- request(url) %>%
+      req_user_agent("R httr2 - NYC Parks Data Analysis") %>%
+      req_timeout(60) %>%
+      req_retry(max_tries = 3, max_seconds = 30)
+    
+    resp <- req_perform(req)
+    
+    if (resp_status(resp) == 200) {
+      csv_content <- resp_body_string(resp)
+      output_path <- file.path(output_dir, filename)
+      write_file(csv_content, output_path)
+      df <- read_csv(output_path, show_col_types = FALSE)
+      
+      return(list(success = TRUE, data = df))
+    }
+  }, error = function(e) {
+    return(list(success = FALSE, error = e$message))
+  })
+}
+
+# ADA Accessible Facilities Download Function
+download_accessible_facilities <- function(output_dir = "data/Group Project",
+                                            filename = "accessible_parks_facilities.csv") {
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  url <- "https://data.cityofnewyork.us/resource/e4ej-j6hn.csv"
+  
+  tryCatch({
+    req <- request(url) %>%
+      req_user_agent("R httr2 - NYC Parks Data Analysis") %>%
+      req_timeout(60) %>%
+      req_retry(max_tries = 3, max_seconds = 30)
+    
+    resp <- req_perform(req)
+    
+    if (resp_status(resp) == 200) {
+      csv_content <- resp_body_string(resp)
+      output_path <- file.path(output_dir, filename)
+      write_file(csv_content, output_path)
+      df <- read_csv(output_path, show_col_types = FALSE)
+      
+      return(list(success = TRUE, data = df))
+    }
+  }, error = function(e) {
+    return(list(success = FALSE, error = e$message))
+  })
+}
+
+# Execute downloads
+parks <- download_parks_properties()
+facilities <- download_accessible_facilities()
+
+Parks_Properties_20251027 <- parks$data
+Directory_of_Accessible_Parks_Facilities_and_Programs_20251027 <- facilities$data
+
+# Convert multipolygon string to sf geometry
+parks_sf <- Parks_Properties_20251027 |>
+  mutate(geometry = st_as_sfc(multipolygon, crs = 4326)) |>
+  st_sf(sf_column_name = "geometry", crs = 4326)
+
+# Load community board boundaries shapefile
+community_boards_sf <- st_read("C:/Users/hymie/Downloads/nycd.shp", quiet = TRUE)
+
+# Load demographic data from NYC American Community Survey https://data.cccnewyork.org/data/map/29/household-income#29/34/2/52/131/a/4
+Median_Incomes <- read_csv("data/Group Project/Median Incomes.csv", skip = 4, show_col_types = FALSE)
+Total_Population <- read_csv("data/Group Project/Total Population.csv", skip = 4, show_col_types = FALSE)
+```
+
+```{r ref.label='data-acquisition', eval=FALSE, echo=TRUE}
+```
+
+```{r demographic-cleaning, include=FALSE}
+# Clean and prepare demographic data by getting the latest year's data and transforming FIPS to integer for joining
+median_income_clean <- Median_Incomes %>%
+  filter(`Household Type` == "All Households", TimeFrame == max(TimeFrame)) %>%
+  mutate(MedianIncome = as.numeric(Data), Fips = sprintf("%03d", as.numeric(Fips))) %>%
+  select(Location, Fips, MedianIncome) %>%
+  filter(!is.na(MedianIncome))
+
+population_clean <- Total_Population %>%
+  filter(TimeFrame == max(TimeFrame)) %>%
+  mutate(Population = Data, Fips = sprintf("%03d", as.numeric(Fips))) %>%
+  select(Location, Fips, Population) %>%
+  filter(!is.na(Population))
+
+neighborhood_demographics <- median_income_clean %>%
+  inner_join(population_clean, by = c("Location", "Fips"))
+```
+
+```{r hybrid-allocation, include=FALSE}
+# Hybrid Method parses communityboard field to identify multi-district parks
+parse_community_boards <- function(cb_string) {
+  if (is.na(cb_string)) return(list(NA))
+  cb_str <- as.character(cb_string)
+  cb_codes <- str_extract_all(cb_str, "\\d{3}")[[1]]
+  return(list(unique(cb_codes)))
+}
+
+# Classify parks as single or multi-district
+parks_classified <- parks_sf %>%
+  mutate(
+    Borough = case_when(
+      borough == "M" ~ "Manhattan",
+      borough == "B" ~ "Brooklyn",
+      borough == "Q" ~ "Queens",
+      borough == "X" ~ "Bronx",
+      borough == "R" ~ "Staten Island"
+    ),
+    cb_list = sapply(communityboard, parse_community_boards),
+    num_community_boards = sapply(cb_list, function(x) length(x[!is.na(x)])),
+    is_multi_district = num_community_boards > 1
+  )
+
+# Single-district parks use direct assignment
+single_district_parks <- parks_classified %>%
+  filter(!is_multi_district) %>%
+  st_drop_geometry() %>%
+  unnest(cb_list) %>%
+  rename(BoroCD = cb_list) %>%
+  filter(!is.na(BoroCD)) %>%
+  mutate(
+    proportion_in_cb = 1.0,
+    weighted_park = 1.0,
+    weighted_acres = acres,
+    intersection_acres = acres
+  ) %>%
+  select(signname, BoroCD, Borough, acres, typecategory, 
+         proportion_in_cb, weighted_park, weighted_acres, intersection_acres)
+
+# Multi-district parks use spatial intersection
+multi_district_parks <- parks_classified %>% filter(is_multi_district)
+
+# Transform to NYC State Plane for accurate area calculations in feet
+multi_parks_transformed <- multi_district_parks %>%
+  st_transform(2263) %>%
+  st_make_valid()
+
+community_boards_transformed <- community_boards_sf %>%
+  st_transform(2263) %>%
+  st_make_valid() %>%
+  select(BoroCD)
+
+# Spatial intersection calculates actual overlap
+multi_parks_intersections <- st_intersection(
+  multi_parks_transformed %>% select(signname, acres, Borough, typecategory),
+  community_boards_transformed
+) %>%
+  mutate(
+    intersection_area_sqft = as.numeric(st_area(geometry)),
+    intersection_acres = intersection_area_sqft / 43560  # Convert sq ft to acres
+  ) %>%
+  st_drop_geometry()
+
+# Calculate proportional allocation
+multi_district_proportions <- multi_parks_intersections %>%
+  group_by(signname) %>%
+  mutate(
+    total_intersection_acres = sum(intersection_acres),
+    proportion_in_cb = intersection_acres / total_intersection_acres,
+    weighted_park = proportion_in_cb,
+    weighted_acres = intersection_acres
+  ) %>%
+  ungroup() %>%
+  select(signname, BoroCD, Borough, acres, typecategory, 
+         proportion_in_cb, weighted_park, weighted_acres, intersection_acres)
+
+# Combine single and multi-district parks into one dataframe
+single_district_parks <- single_district_parks %>% mutate(BoroCD = as.integer(BoroCD))
+multi_district_proportions <- multi_district_proportions %>% mutate(BoroCD = as.integer(BoroCD))
+parks_combined <- bind_rows(single_district_parks, multi_district_proportions)
+```
+
+```{r accessibility-metrics, include=FALSE}
+# Count accessible facilities by park
+ada_facilities <- Directory_of_Accessible_Parks_Facilities_and_Programs_20251027 %>%
+  rename(ParkName = name) %>%
+  group_by(ParkName) %>%
+  summarize(
+    AccessibleFacilitiesCount = n(),
+    FacilityTypes = paste(unique(type), collapse = ", "),
+    .groups = "drop"
+  )
+# Join with accessibility data
+parks_with_accessibility <- parks_combined %>%
+  left_join(ada_facilities, by = c("signname" = "ParkName")) %>%
+  mutate(
+    AccessibleFacilitiesCount = ifelse(is.na(AccessibleFacilitiesCount), 0, AccessibleFacilitiesCount),
+    HasAccessibleFacilities = !is.na(FacilityTypes) & AccessibleFacilitiesCount > 0,
+    weighted_accessible = as.numeric(HasAccessibleFacilities) * proportion_in_cb,
+    weighted_facilities = AccessibleFacilitiesCount * proportion_in_cb
+  )
+
+# Aggregate by community board with proportional weights
+community_board_summary <- parks_with_accessibility %>%
+  group_by(Borough, BoroCD) %>%
+  summarize(
+    TotalParks = round(sum(weighted_park), 1),
+    ParksWithAccessibleFacilities = round(sum(weighted_accessible), 1),
+    TotalAccessibleFacilities = round(sum(weighted_facilities), 1),
+    TotalAcres = round(sum(weighted_acres, na.rm = TRUE), 1),
+    PercentParksAccessible = round(100 * sum(weighted_accessible) / sum(weighted_park), 1),
+    AvgAccessibleFacilitiesPerPark = round(sum(weighted_facilities) / sum(weighted_park), 2),
+    .groups = "drop"
+  ) %>%
+  filter(TotalParks > 1) %>%
+  rename(CommunityBoard = BoroCD) %>%
+  mutate(CommunityBoard = sprintf("%03d", CommunityBoard)) %>%
+  left_join(neighborhood_demographics, by = c("CommunityBoard" = "Fips")) %>%
+  filter(!is.na(MedianIncome) | !is.na(Population))
+```
+
+```{r demographic-combining, include=FALSE}
+# Create income and population density quartiles for analysis
+community_board_analysis <- community_board_summary %>%
+  filter(!is.na(MedianIncome) & !is.na(Population)) %>%
+  mutate(
+    IncomeQuartile = cut(MedianIncome, 
+                        breaks = quantile(MedianIncome, probs = seq(0, 1, 0.25), na.rm = TRUE),
+                        labels = c("Low Income", "Lower-Middle", "Upper-Middle", "High Income"),
+                        include.lowest = TRUE),
+    PopulationDensity = Population / (TotalAcres + 1),
+    DensityQuartile = cut(PopulationDensity,
+                         breaks = quantile(PopulationDensity, probs = seq(0, 1, 0.25), na.rm = TRUE),
+                         labels = c("Low Density", "Medium-Low", "Medium-High", "High Density"),
+                         include.lowest = TRUE),
+    CommunityBoardLabel = paste0(Borough, " CB ", as.integer(CommunityBoard))
+  )
+
+# Join with community board geometries for mapping
+community_board_analysis <- community_boards_sf %>%
+  mutate(CommunityBoard = sprintf("%03d", BoroCD)) %>%
+  select(CommunityBoard, geometry) %>%
+  right_join(community_board_analysis, by = "CommunityBoard") %>%
+  st_as_sf()
+```
+
+# Methodology
+
+## Hybrid Spatial Allocation for Multi-District Parks
+
+A **critical methodological challenge** involves parks that span multiple community boards. Large parks like Central Park, Prospect Park, and Van Cortlandt Park cross community district boundaries, creating ambiguity in allocating their accessibility features to specific neighborhoods.  
+
+I developed a hybrid spatial allocation method that balances computational efficiency with geographic precision. The parks dataset encodes multi-district parks by concatenating three-digit community board codes, for example, Central Park = "110111107105108112", indicating presence in six Manhattan community boards.
+
+The hybrid approach operates as follows:
+
+Single-District Parks (85% of dataset): Parks are assigned directly to their designated community board using the communityboard field, with full weight (proportion = 1.0) allocated to that district. This approach is **computationally efficient and accurate,** as these parks do not cross boundaries.  
+
+Multi-District Parks (15% of dataset): I performed spatial intersection analysis using the `sf` package in R, calculating the **actual area of each park falling within each community board boundary.** Parks were then **allocated proportionally** based on geographic overlap. For example, if 70% of a park's area falls in Community Board A and 30% in Community Board B, each board receives 0.7 and 0.3 "park credits" respectively, along with proportional allocation of accessible facilities.
+
+Justification for Hybrid Method: This hybrid method ensures accurate citywide totals (avoiding double-counting) while **properly crediting communities** for the park resources they actually contain. The spatial intersection was calculated in the NYC State Plane coordinate system to ensure **precise area measurements** in square feet, then converted to acres for interpretability.  
+```{r ref.label='hybrid-allocation', eval=FALSE, echo=TRUE}
+```
+
+## Accessibility Metrics
+For each community board, I calculated:
+
+- **Total Parks (weighted):** Sum of park allocations accounting for shared parks  
+- **Parks with Accessible Facilities:** Count of parks containing ≥1 ADA feature  
+- **Percent Parks Accessible:** Primary outcome (% of parks with accessible facilities)  
+- **Total Accessible Facilities:** Sum of individual ADA features (playgrounds, restrooms, trails, etc.)  
+- **Total Park Acres:** Geographic area of parks within the community board  
+```{r ref.label='accessibility-metrics', eval=FALSE, echo=TRUE}
+```
+
+## Socioeconomic Classification
+
+Community boards were classified into quartiles:  
+Income Quartiles: Based on median household income  
+
+* **Low Income:** \$30,846-\$49,345  
+* **Lower-Middle:** \$49,346-\$74,000  
+* **Upper-Middle:** \$74,001-\$89,141  
+* **High Income:** \$89,142-\$198,945  
+
+Population Density Quartiles: Calculated as population per acre of parkland
+
+* **Low Density:** 215-628 people/park acre  
+* **Medium-Low:** 629-1,200 people/park acre  
+* **Medium-High:** 1,201-1,841 people/park acre  
+* **High Density:** 1,842-5,981 people/park acre  
+
+This metric captures **intensity of demand** for park resources, recognizing that accessibility has different practical implications in areas with high versus low user density.
+```{r ref.label='demographic-cleaning', eval=FALSE, echo=TRUE}
+```
+```{r ref.label='demographic-combining', eval=FALSE, echo=TRUE}
+```
+
+# Results
+
+## Geographic Disparities in Park Accessibility
+
+```{r top-accessible, include=FALSE}
+# Create top 10 accessible community boards by percentage of parks accessible
+top_accessible <- community_board_analysis %>%
+  st_drop_geometry() %>%
+  arrange(desc(PercentParksAccessible)) %>%
+  select(CommunityBoardLabel, Location, TotalParks, PercentParksAccessible, MedianIncome, Population) %>%
+  head(10)
+
+top_accessible_dt <- top_accessible %>%
+  mutate(
+    MedianIncome = scales::dollar(MedianIncome),
+    Population = scales::comma(round(Population))
+  ) %>%
+  datatable(
+    caption = tags$caption(
+      style = 'caption-side: top; text-align: center; color: #2c3e50; font-size: 18px; font-weight: bold;',
+      'Top 10 Community Boards by Park Accessibility'
+    ),
+    colnames = c('Community Board' = 'CommunityBoardLabel', 'Neighborhood' = 'Location',
+                 'Total Parks' = 'TotalParks', '% Accessible' = 'PercentParksAccessible',
+                 'Median Income' = 'MedianIncome', 'Population' = 'Population'),
+    options = list(pageLength = 10, dom = 't', ordering = FALSE, autowidth=TRUE,
+                   columnDefs = list(list(className = 'dt-center', targets = c(2, 3)),
+                                    list(className = 'dt-right', targets = c(4, 5)))),
+    rownames = FALSE,
+    class = 'cell-border stripe hover'
+  ) %>%
+  formatStyle('% Accessible',
+    background = styleColorBar(range(top_accessible$PercentParksAccessible), '#a6d96a'),
+    backgroundSize = '100% 90%', backgroundRepeat = 'no-repeat', backgroundPosition = 'center'
+  )
+```
+The analysis reveals **dramatic variation** in park accessibility across NYC's 59 community boards, ranging from 0% to 36.1% of parks containing accessible facilities.   
+
+The citywide average stands at **just 17.4%,** indicating fewer than one in five parks contain ADA-compliant facilities.  
+
+### Top Accessible Community Boards:     
+`r top_accessible_dt`  
+
+* Queens Community Board 411 (Bayside) **leads with 36.1% accessibility** across 33 parks, despite moderate median income ($107,607).     
+* **Brooklyn dominates high-accessibility areas,** claiming seven of the top ten community boards, including Crown Heights South (35.1%), East Flatbush (33.3%), Bensonhurst (33.1%), and Park Slope (31.2%).   
+* Notably, the Bronx's Williamsbridge community board achieves 30.8% accessibility, demonstrating that **high performance is not confined to wealthy areas.**    
+
+```{r ref.label='top-accessible', eval=FALSE, echo=TRUE}
+```
+
+```{r bottom-accessible, include=FALSE}
+# Create bottom 10 community boards by percentage of parks accessible
+bottom_accessible <- community_board_analysis %>%
+  st_drop_geometry() %>%
+  arrange(PercentParksAccessible) %>%
+  select(CommunityBoardLabel, Location, TotalParks, PercentParksAccessible, MedianIncome, Population) %>%
+  head(10)
+
+bottom_accessible_dt <- bottom_accessible %>%
+  mutate(
+    MedianIncome = scales::dollar(MedianIncome),
+    Population = scales::comma(round(Population))
+  ) %>%
+  datatable(
+    caption = tags$caption(
+      style = 'caption-side: top; text-align: center; color: #2c3e50; font-size: 18px; font-weight: bold;',
+      'Bottom 10 Community Boards by Park Accessibility'
+    ),
+    colnames = c('Community Board' = 'CommunityBoardLabel', 'Neighborhood' = 'Location',
+                 'Total Parks' = 'TotalParks', '% Accessible' = 'PercentParksAccessible',
+                 'Median Income' = 'MedianIncome', 'Population' = 'Population'),
+    options = list(pageLength = 10, dom = 't', ordering = FALSE, autowidth=TRUE,
+                   columnDefs = list(list(className = 'dt-center', targets = c(2, 3)),
+                                    list(className = 'dt-right', targets = c(4, 5)))),
+    rownames = FALSE,
+    class = 'cell-border stripe hover'
+  ) %>%
+  formatStyle('% Accessible',
+    background = styleColorBar(range(bottom_accessible$PercentParksAccessible), '#d73027'),
+    backgroundSize = '100% 90%', backgroundRepeat = 'no-repeat', backgroundPosition = 'center'
+  )
+```
+
+### Critical Accessibility Deserts:     
+`r bottom_accessible_dt`  
+
+* Queens Community Board 404 (Elmhurst/Corona) presents the **most severe crisis** with zero accessible facilities across 29.6 parks serving 163,588 residents. This densely populated, ethnically diverse community, which is **home to large immigrant populations,** faces complete absence of accessible park infrastructure.     
+* Manhattan's Central Harlem (CB 110) shows only 6.2% accessibility across 50 parks despite serving 125,000 residents in a **historically under-resourced neighborhood (median income $48,977).**       
+* Brooklyn's East New York, with 195,228 residents and 75 parks, achieves merely 6.6% accessibility, representing the **largest population with critically poor access.**      
+
+These geographic disparities reveal systematic gaps in accessibility infrastructure, with certain communities entirely excluded from accessible outdoor recreation despite significant park acreage.  
+```{r ref.label='bottom-accessible', eval=FALSE, echo=TRUE}
+```
+
+### Top 15 Community Boards by Park Accessibility
+```{r top-15-cb, include=FALSE}
+top_15_cb <- community_board_analysis %>%
+  st_drop_geometry() %>%
+  arrange(desc(PercentParksAccessible)) %>%
+  head(15)
+
+top_15_cb_plot <- ggplot(top_15_cb, aes(x = reorder(Location, PercentParksAccessible), y = PercentParksAccessible)) +
+  geom_col(aes(fill = Borough), show.legend = TRUE) +
+  geom_text(aes(label = paste0(PercentParksAccessible, "%")), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(title = "Top 15 Community Boards by Park Accessibility",
+       subtitle = "Percentage of parks with accessible facilities",
+       x = NULL, y = "% of Parks with Accessible Facilities", fill = "Borough") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        axis.text.y = element_text(size = 8), axis.text.x = element_text(size = 10)) +
+  scale_y_continuous(limits = c(0, max(top_15_cb$PercentParksAccessible) * 1.15))
+```
+```{r top-15-cb-print, echo=FALSE}
+print(top_15_cb_plot)
+```
+```{r ref.label='top-15-cb', eval=FALSE, echo=TRUE}
+```
+
+## The Income Paradox
+```{r income-summary, include=FALSE}
+# Create income summary by community board using quartiles
+income_summary <- community_board_analysis %>%
+  st_drop_geometry() %>%
+  group_by(IncomeQuartile) %>%
+  summarize(
+    CommunityBoards = n(),
+    AvgMedianIncome = round(mean(MedianIncome)),
+    AvgPercentAccessible = round(mean(PercentParksAccessible), 1),
+    AvgAccessibleFacilities = round(mean(TotalAccessibleFacilities), 1),
+    TotalParks = round(sum(TotalParks), 1),
+    .groups = "drop"
+  )
+
+income_summary_dt <- income_summary %>%
+  mutate(AvgMedianIncome = scales::dollar(AvgMedianIncome)) %>%
+  datatable(
+    caption = tags$caption(
+      style = 'caption-side: top; text-align: center; color: #2c3e50; font-size: 18px; font-weight: bold;',
+      'Park Accessibility by Income Quartile'
+    ),
+    colnames = c('Income Level' = 'IncomeQuartile', 'Community Boards' = 'CommunityBoards',
+                 'Avg Median Income' = 'AvgMedianIncome', 'Avg % Accessible' = 'AvgPercentAccessible',
+                 'Avg Facilities' = 'AvgAccessibleFacilities', 'Total Parks' = 'TotalParks'),
+    options = list(pageLength = 4, dom = 't', ordering = FALSE, autowidth=TRUE,
+                   columnDefs = list(list(className = 'dt-center', targets = c(1, 3, 4, 5)),
+                                    list(className = 'dt-right', targets = 2))),
+    rownames = FALSE,
+    class = 'cell-border stripe hover'
+  ) %>%
+  formatStyle('Avg % Accessible',
+    background = styleColorBar(range(income_summary$AvgPercentAccessible), '#91bfdb'),
+    backgroundSize = '100% 90%', backgroundRepeat = 'no-repeat', backgroundPosition = 'center'
+  )
+
+income_summary_plot <- ggplot(income_summary, aes(x = IncomeQuartile, y = AvgPercentAccessible)) +
+  geom_col(aes(fill = IncomeQuartile), show.legend = FALSE) +
+  geom_text(aes(label = paste0(AvgPercentAccessible, "%")), vjust = -0.5, size = 3.5) +
+  labs(title = "Park Accessibility by Community Board Income Level",
+       subtitle = paste0("Based on ", income_summary$CommunityBoards[1], " community boards per quartile"),
+       x = "Income Level", y = "Avg % of Parks with Accessible Facilities") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1), axis.text = element_text(size = 10)) +
+  scale_y_continuous(limits = c(0, max(income_summary$AvgPercentAccessible) * 1.15))
+```
+
+```{r income-summary-plot, echo=FALSE}
+print(income_summary_plot)
+```
+`r income_summary_dt`
+**Key Finding:**   
+**Lower-middle income communities achieve the highest accessibility (19.3%),** outperforming high-income areas (17.0%) by 2.3 percentage points. **Low-income areas show the worst performance (12.9%).** This inverted-U pattern challenges frameworks treating gentrification as prerequisite for improved amenities.  
+
+The counterintuitive finding that lower-middle income areas outperform high-income neighborhoods by 2.3 percentage points challenges assumptions about resource allocation in urban parks. This pattern may reflect **targeted advocacy efforts, historical investment in working-class neighborhoods, or community organizing success in securing accessible infrastructure.**  
+
+Notable Outliers:   
+Battery Park/TriBeCa (Manhattan CB 101) with the city's highest median income (\$198,945) achieves only 5.0% accessibility, while Crown Heights South with \$67,767 median income achieves 35.1%, which is **seven times better** despite substantially less wealth.  
+
+These patterns suggest that factors beyond neighborhood wealth, such as political advocacy, borough-level policies, community organizing, or historical investment patterns, drive accessibility outcomes more strongly than income alone.
+```{r ref.label='income-summary', eval=FALSE, echo=TRUE}
+```
+
+## Population Density Shows Complex, Non-Linear Patterns
+
+```{r density-summary, include=FALSE}
+# Create population density summary by community board using quartiles
+density_summary <- community_board_analysis %>%
+  st_drop_geometry() %>%
+  group_by(DensityQuartile) %>%
+  summarize(
+    CommunityBoards = n(),
+    AvgPopulation = round(mean(Population)),
+    AvgPercentAccessible = round(mean(PercentParksAccessible), 1),
+    AvgAccessibleFacilities = round(mean(TotalAccessibleFacilities), 1),
+    TotalParks = round(sum(TotalParks), 1),
+    .groups = "drop"
+  )
+
+density_summary_dt <- density_summary %>%
+  mutate(AvgPopulation = scales::comma(AvgPopulation)) %>%
+  datatable(
+    caption = tags$caption(
+      style = 'caption-side: top; text-align: center; color: #2c3e50; font-size: 18px; font-weight: bold;',
+      'Park Accessibility by Population Density Quartile'
+    ),
+    colnames = c('Density Level' = 'DensityQuartile', 'Community Boards' = 'CommunityBoards',
+                 'Avg Population' = 'AvgPopulation', 'Avg % Accessible' = 'AvgPercentAccessible',
+                 'Avg Facilities' = 'AvgAccessibleFacilities', 'Total Parks' = 'TotalParks'),
+    options = list(pageLength = 4, dom = 't', ordering = FALSE, autowidth=TRUE,
+                   columnDefs = list(list(className = 'dt-center', targets = c(1, 3, 4, 5)),
+                                    list(className = 'dt-right', targets = 2))),
+    rownames = FALSE,
+    class = 'cell-border stripe hover'
+  ) %>%
+  formatStyle('Avg % Accessible',
+    background = styleColorBar(range(density_summary$AvgPercentAccessible), '#41b6c4'),
+    backgroundSize = '100% 90%', backgroundRepeat = 'no-repeat', backgroundPosition = 'center'
+  )
+
+density_summary_plot <- ggplot(density_summary, aes(x = DensityQuartile, y = AvgPercentAccessible)) +
+  geom_col(aes(fill = DensityQuartile), show.legend = FALSE) +
+  geom_text(aes(label = paste0(AvgPercentAccessible, "%")), vjust = -0.5, size = 3.5) +
+  labs(title = "Park Accessibility by Population Density",
+       subtitle = "Population relative to park acreage by community board",
+       x = "Population Density Level", y = "Avg % of Parks with Accessible Facilities") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1), axis.text = element_text(size = 10)) +
+  scale_y_continuous(limits = c(0, max(density_summary$AvgPercentAccessible) * 1.15))
+```
+`r density_summary_dt`
+```{r density-summary-plot, echo=FALSE}
+print(density_summary_plot)
+```
+**Population density quartile analysis reveals a U-shaped pattern:**  
+
+* **Low Density:** 19.0% accessible (7.9 facilities/CB)  
+* **Medium-Low:** 15.0% accessible  (6.3 facilities/CB)
+* **Medium-High:** 13.4% accessible (worst performance)  
+* **High Density:** 18.9% accessible (but only 3.9 facilities/CB)  
+
+This "middle squeeze" suggests medium-high density neighborhoods are facing **substantial demand** without extreme crowding and therefore receive least attention. High-density areas **surprisingly match** low-density accessibility rates, though each accessible feature serves exponentially more users, raising capacity concerns.
+
+The population density metric also captures service pressure: high-density community boards average 14,485 residents per community board compared to 15,091 in low-density areas, but with dramatically less park acreage per capita. This means accessible facilities in dense neighborhoods serve exponentially more users, raising questions about capacity and actual accessibility in practice versus nominal compliance.  
+```{r ref.label='density-summary', eval=FALSE, echo=TRUE}
+```
+
+## Borough-Level Patterns and Spatial Equity
+
+```{r borough-summary, include=FALSE}
+# Create borough heatmap of accessibility by income quartile
+borough_heatmap <- community_board_analysis %>%
+  st_drop_geometry() %>%
+  group_by(Borough, IncomeQuartile) %>%
+  summarize(AvgPercentAccessible = mean(PercentParksAccessible), Count = n(), .groups = "drop") %>%
+  ggplot(aes(x = IncomeQuartile, y = Borough, fill = AvgPercentAccessible)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(round(AvgPercentAccessible, 1), "%\n(n=", Count, ")")), size = 3) +
+  scale_fill_gradient(low = "#FEE5D9", high = "#A50F15", name = "Avg %\nAccessible") +
+  labs(title = "Park Accessibility by Borough and Income Level",
+       subtitle = "Average % of parks with accessible facilities",
+       x = "Income Quartile", y = "Borough") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r borough-summary-plot, echo=FALSE}
+print(borough_heatmap)
+```
+
+### Brooklyn's Consistent Excellence:   
+Brooklyn demonstrates the **most equitable accessibility distribution** across income levels, with lower-middle income neighborhoods achieving 26.8% accessibility, the **highest performance citywide,** and maintaining 14.9%-26.8% accessibility across all income quartiles. This consistency suggests **effective borough-wide policies or advocacy networks** that transcend neighborhood wealth. Brooklyn's strong showing across seven of the top fifteen community boards indicates systemic factors promoting accessibility investment.
+
+### Manhattan's Crisis:   
+Manhattan exhibits **concerningly weak accessibility** across nearly all income levels (12.8-17.4%), with high-income areas paradoxically achieving only 12.8% accessibility. The concentration of low-accessibility, high-income neighborhoods (Battery Park, TriBeCa, Upper East Side) suggests that Manhattan's **real estate pressures, park conservancy models, or historical design priorities may deprioritize ADA compliance** in favor of aesthetics or historic preservation.  
+
+### The Bronx's Economic Constraints:   
+**Eight of twelve Bronx community boards fall into the low-income category,** yet achieve 12.5-17.5% accessibility, which is approaching or matching citywide averages despite severe resource constraints. This **resilience suggests that advocacy organizations, community organizing, or targeted municipal programs may partially compensate for economic disadvantage,** though absolute facility counts remain low.  
+ 
+### Queens' Extreme Variation:  
+Queens displays the **widest accessibility range (0% to 36.1%),** with high-income areas performing significantly better (21.2%) than low-income areas (8.6%). This 12.6 percentage point gap, the largest among boroughs, suggests that in Queens, neighborhood wealth may matter more than in other boroughs, potentially due to **weaker borough-wide equity policies or stronger influence of local community boards** on resource allocation.
+
+### Staten Island's Limited Data:  
+Staten Island's three community boards provide insufficient data for robust conclusions, though high-income areas achieve 17.1% accessibility, **roughly matching citywide averages.**    
+
+```{r ref.label='borough-summary', eval=FALSE, echo=TRUE}
+```
+
+## Interactive Spatial Visualization
+
+```{r interactive-map, include=FALSE}
+# Prepare data for Leaflet map
+community_board_map_data <- st_transform(community_board_analysis, 4326)
+
+pal_accessibility <- colorNumeric(palette = "RdYlGn", domain = community_board_map_data$PercentParksAccessible, reverse = FALSE)
+pal_income <- colorFactor(palette = c("#d73027", "#fc8d59", "#91bfdb", "#4575b4"),
+                          levels = c("Low Income", "Lower-Middle", "Upper-Middle", "High Income"))
+pal_density <- colorFactor(palette = c("#ffffcc", "#a1dab4", "#41b6c4", "#225ea8"),
+                           levels = c("Low Density", "Medium-Low", "Medium-High", "High Density"))
+
+create_cb_popup <- function(data) {
+  lapply(1:nrow(data), function(i) {
+    HTML(paste0(
+      "<div style='font-family: Arial; min-width: 280px;'>",
+      "<h3 style='color: #2c3e50; border-bottom: 2px solid #3498db;'>", data$CommunityBoardLabel[i], "</h3>",
+      "<p><strong>", data$Location[i], "</strong></p>",
+      "<div style='background: #ecf0f1; padding: 10px; margin: 8px 0; border-radius: 5px;'>",
+      "<strong>🏞️ Park Accessibility</strong><br/>",
+      "<span style='font-size: 24px; font-weight: bold; color: ",
+      ifelse(data$PercentParksAccessible[i] > 25, "#27ae60", ifelse(data$PercentParksAccessible[i] > 15, "#f39c12", "#e74c3c")),
+      ";'>", data$PercentParksAccessible[i], "%</span> accessible<br/>",
+      "Parks with facilities: <strong>", data$ParksWithAccessibleFacilities[i], " of ", data$TotalParks[i], "</strong><br/>",
+      "Total facilities: <strong>", data$TotalAccessibleFacilities[i], "</strong><br/>",
+      "Park acres: <strong>", format(data$TotalAcres[i], big.mark = ","), "</strong></div>",
+      "<div style='background: #e8f5e9; padding: 10px; margin: 8px 0; border-radius: 5px;'>",
+      "<strong>👥 Demographics</strong><br/>",
+      "Median Income: <strong>$", format(data$MedianIncome[i], big.mark = ","), "</strong><br/>",
+      "Income Level: <strong>", data$IncomeQuartile[i], "</strong><br/>",
+      "Population: <strong>", format(round(data$Population[i]), big.mark = ","), "</strong><br/>",
+      "Density: <strong>", data$DensityQuartile[i], "</strong></div></div>"
+    ))
+  })
+}
+
+cb_popups <- create_cb_popup(community_board_map_data)
+
+interactive_accessibility_map <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron, group = "Light") %>%
+  addPolygons(
+    data = community_board_map_data,
+    fillColor = ~pal_accessibility(PercentParksAccessible),
+    weight = 2, opacity = 1, color = "white", fillOpacity = 0.7,
+    highlightOptions = highlightOptions(weight = 3, color = "#666", fillOpacity = 0.9),
+    popup = cb_popups,
+    label = ~lapply(paste0(CommunityBoardLabel, ": ", PercentParksAccessible, "% accessible"), HTML),
+    group = "Accessibility %"
+  ) %>%
+  addPolygons(
+    data = community_board_map_data,
+    fillColor = ~pal_income(IncomeQuartile),
+    weight = 2, opacity = 1, color = "white", fillOpacity = 0.7,
+    highlightOptions = highlightOptions(weight = 3, color = "#666", fillOpacity = 0.9),
+    popup = cb_popups,
+    label = ~lapply(paste0(CommunityBoardLabel, ": ", IncomeQuartile), HTML),
+    group = "Income Level"
+  ) %>%
+  addPolygons(
+    data = community_board_map_data,
+    fillColor = ~pal_density(DensityQuartile),
+    weight = 2, opacity = 1, color = "white", fillOpacity = 0.7,
+    highlightOptions = highlightOptions(weight = 3, color = "#666", fillOpacity = 0.9),
+    popup = cb_popups,
+    label = ~lapply(paste0(CommunityBoardLabel, ": ", DensityQuartile), HTML),
+    group = "Population Density"
+  ) %>%
+  addLegend(pal = pal_accessibility, values = community_board_map_data$PercentParksAccessible,
+            title = "Accessibility %", position = "bottomright", group = "Accessibility %") %>%
+  addLegend(pal = pal_income, values = community_board_map_data$IncomeQuartile,
+            title = "Income Level", position = "bottomright", group = "Income Level") %>%
+  addLegend(pal = pal_density, values = community_board_map_data$DensityQuartile,
+            title = "Population Density", position = "bottomright", group = "Population Density") %>%
+  addLayersControl(
+    baseGroups = "Light",
+    overlayGroups = c("Accessibility %", "Income Level", "Population Density"),
+    options = layersControlOptions(collapsed = FALSE),
+    position = "topleft"
+  ) %>%
+  hideGroup(c("Income Level", "Population Density")) %>%
+  addScaleBar(position = "bottomleft") %>%
+  setView(lng = -73.935242, lat = 40.730610, zoom = 10)
+```
+
+The interactive map provides layered visualization of accessibility patterns, income levels, and population density. There are toggles to explore spatial relationships, with detailed pop-ups providing comprehensive statistics for each community board. The spatial visualization reveals clear geographic clustering of accessibility deserts in central Queens and northern Manhattan.  
+```{r interactive-map-print, echo=FALSE}
+interactive_accessibility_map
+```
+
+```{r ref.label='interactive-map', eval=FALSE, echo=TRUE}
+```
+
+# Discussion and Policy Implications
+
+## Challenging the Wealth-Access Assumption  
+Lower-middle income communities outperforming high-income areas by 6.4 percentage points suggests **community organizing, advocacy capacity, or targeted municipal programs** may matter more than neighborhood resources.  
+
+This "income paradox" implies accessibility improvements are achievable without gentrification, which is a **crucial insight for equity-focused policy.** If Battery Park with \$198,945 median income achieves only 5% accessibility while Crown Heights South with \$67,767 achieves 35.1%, the limiting factor is political will, not financial resources.  
+
+## Borough Politics as Driving Factor  
+Brooklyn's consistent 14.9%-26.8% accessibility across income levels strongly suggests **borough-level policies drive outcomes** more powerfully than neighborhood characteristics. Investigating Brooklyn's success could identify replicable practices: Does Brooklyn Parks Department prioritize accessibility retrofits more systematically? Do community boards coordinate advocacy more effectively? Are capital budget processes more responsive to accessibility demands?  
+
+Conversely, understanding Manhattan's **persistent underperformance** despite greater resources could reveal barriers: Do historic preservation requirements impede accessibility upgrades? Does prevalence of conservancy-managed parks create governance structures less responsive to accessibility mandates?  
+
+## The Middle-Income and Medium-Density Squeeze  
+Medium-high density, middle-income neighborhoods achieving only 13.4% accessibility suggest these communities fall through policy cracks and are **neither targeted by low-income programs nor commanding high-income advocacy resources.** Explicit policies ensuring equitable distribution across all income and density categories could address this gap.
+
+## Urgent Policy Recommendations  
+
+**1. Emergency Intervention in Accessibility Deserts:** Elmhurst/Corona (0%), Central Harlem (6.2%), East New York (6.6%) require immediate accessibility audits and accelerated retrofit programs.  
+**2. Minimum Accessibility Standards:** Establish enforceable standards (50% of parks with accessible facilities within 5 years, 100% within 10 years) with accountability mechanisms.  
+**3. Investigate and Replicate Brooklyn's Success:** Systematic analysis of Brooklyn Parks Department policies could identify transferable practices.   
+**4. Capacity Planning for High-Density Areas:** While high-density CBs achieve 18.9% accessibility, they operate with only 3.9 facilities versus 7.9 in low-density areas. Attention to capacity, not just nominal compliance, is essential.
+
+# Conclusion
+
+This analysis reveals that ADA accessibility of NYC parks **varies dramatically** across boroughs and neighborhoods (0% to 36.1%), but not in patterns predicted by conventional assumptions about wealth and public goods. Lower-middle income communities achieve highest accessibility (19.3%), while wealthiest neighborhoods lag at 17.0%.
+
+Borough-level patterns prove striking, with **Brooklyn demonstrating consistent 14.9%-26.8% accessibility** across income levels, Manhattan struggling at 12.8%-17.4%, and Queens varying from 0% to 36.1%. These geographic patterns strongly suggest borough-specific policies, institutional cultures, or advocacy networks drive outcomes more powerfully than neighborhood characteristics.
+
+The **citywide average of 17.4% accessibility**, which is fewer than one in five parks containing accessible facilities, represents systematic failure rather than resource constraints. Lower-middle income communities achieving 19.3% accessibility demonstrate substantial improvements are feasible without dramatic new resources. What's required is political will, systematic prioritization, and enforcement of existing ADA obligations.
+
+## Methodological Contributions and Future Research Directions
+
+This analysis advances spatial equity research through its **novel hybrid allocation methodology** for multi-district parks. By combining direct assignment for single-district parks (85% of dataset) with proportional spatial intersection for multi-district parks (15%), the approach achieves both computational efficiency and geographic precision. This methodology addresses a critical gap in urban park accessibility research, where previous studies either ignored multi-district parks entirely or arbitrarily assigned them to single jurisdictions, introducing systematic bias.
+
+The **proportional allocation of Central Park** exemplifies this methodological innovation: rather than crediting all 843 acres and accessibility features to a single community board, the spatial intersection reveals that Community Board 110 contains 28% of Central Park's area, Community Board 111 contains 22%, and the remaining portions distribute across four additional boards. This precision ensures that accessibility statistics accurately reflect the park resources actually available to each community's residents, rather than creating artificial winners and losers based on arbitrary administrative boundaries.
+
+## Future research should extend this analysis in several critical directions. 
+
+First, examining the **quality and maintenance** of accessible facilities, not merely their presence, would reveal whether nominal compliance translates to practical usability. A community board with "accessible" playgrounds may still fail to provide meaningful access if facilities are poorly maintained, lack accessible pathways, or concentrate in geographically isolated parks rather than distributing equitably across neighborhoods.
+
+Second, **temporal analysis tracking accessibility changes** over multiple years would identify whether gaps are widening or narrowing, and whether capital investment patterns favor certain communities over time. Do accessibility improvements follow gentrification patterns? Do low-income communities experience facility degradation while wealthy areas receive upgrades? Longitudinal data would illuminate these dynamics.
+
+Third, **qualitative research with disability communities** across different neighborhoods would capture lived experiences of accessibility, or inaccessibility, that quantitative metrics cannot measure. Do residents with disabilities actually use "accessible" facilities? What barriers persist beyond nominal ADA compliance? How do transportation accessibility, proximity to home, and social factors interact with physical infrastructure?
+
+Fourth, **comparative analysis across other major cities** would contextualize NYC's performance. Is 17.4% accessibility typical for major U.S. cities, or does NYC lag behind? What policies in cities achieving higher accessibility rates could inform NYC's approach? Cross-city comparisons would identify best practices and policy innovations worth replicating.
+
+The intersection of **environmental justice and disability rights** emerges as a central concern from this analysis. Communities facing the worst accessibility, Elmhurst/Corona, Central Harlem, East New York, are predominantly low-income communities of color with large immigrant populations. These neighborhoods already face environmental injustices including air pollution, heat island effects, and limited green space. The additional burden of inaccessible parks compounds these inequities, effectively excluding residents with disabilities from the limited outdoor recreational opportunities that do exist.
+
+This **double marginalization**, based on both race/class and disability, violates both the Americans with Disabilities Act and environmental justice principles articulated in Executive Order 12898 and subsequent federal guidance. When accessibility infrastructure concentrates in wealthy, predominantly white neighborhoods while accessibility deserts persist in low-income communities of color, disability access becomes not merely a technical compliance issue but a **civil rights imperative**.
+
+The finding that income does not predict accessibility paradoxically offers both concern and hope. The concern: even communities with substantial resources (Battery Park/TriBeCa with $198,945 median income) may neglect accessibility when political will is absent. The hope: substantial improvements are achievable in low and moderate-income communities when advocacy, organizing, and responsive governance converge, as Brooklyn's success demonstrates. **Accessibility is not fundamentally a resource problem but a political priority problem.**
+
+Critical accessibility deserts (Elmhurst/Corona at 0%, Central Harlem at 6.2%, East New York at 6.6%) demand **immediate intervention.** These communities face systematic exclusion from accessible recreation despite ADA mandates and environmental justice principles, compounding existing inequities in historically marginalized neighborhoods.

@@ -22,6 +22,10 @@ website:
             href: mp03.qmd
           - text: "Mini-Project 04"
             href: mp04.qmd
+          - text: "Final Project"
+            href: summary_report.qmd
+          - text: "Final Project Individual Report"
+            href: individual_report.qmd
       - icon: github
         href: https://github.com/hymiee
 
