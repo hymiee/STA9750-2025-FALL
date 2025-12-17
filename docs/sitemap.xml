@@ -1,39 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://hymiee.github.io/STA9750-2025-FALL/mp04.html</loc>
-    <lastmod>2025-12-05T16:34:46.505Z</lastmod>
-  </url>
-  <url>
-    <loc>https://hymiee.github.io/STA9750-2025-FALL/mp02.html</loc>
-    <lastmod>2025-10-31T20:23:46.961Z</lastmod>
-  </url>
-  <url>
-    <loc>https://hymiee.github.io/STA9750-2025-FALL/index.html</loc>
-    <lastmod>2025-09-11T23:07:32.745Z</lastmod>
-  </url>
-  <url>
-    <loc>https://hymiee.github.io/STA9750-2025-FALL/final_individual_report.html</loc>
-    <lastmod>2025-12-10T18:36:36.544Z</lastmod>
-  </url>
-  <url>
-    <loc>https://hymiee.github.io/STA9750-2025-FALL/mp01.html</loc>
-    <lastmod>2025-10-03T17:58:37.112Z</lastmod>
+    <loc>https://hymiee.github.io/STA9750-2025-FALL/summary_report.html</loc>
+    <lastmod>2025-12-16T15:26:39.569Z</lastmod>
   </url>
   <url>
     <loc>https://hymiee.github.io/STA9750-2025-FALL/mp03.html</loc>
     <lastmod>2025-11-16T16:32:25.760Z</lastmod>
   </url>
   <url>
+    <loc>https://hymiee.github.io/STA9750-2025-FALL/mp01.html</loc>
+    <lastmod>2025-10-03T17:58:37.112Z</lastmod>
+  </url>
+  <url>
+    <loc>https://hymiee.github.io/STA9750-2025-FALL/index.html</loc>
+    <lastmod>2025-09-11T23:07:32.745Z</lastmod>
+  </url>
+  <url>
     <loc>https://hymiee.github.io/STA9750-2025-FALL/individual_report.html</loc>
     <lastmod>2025-12-17T03:15:11.634Z</lastmod>
   </url>
   <url>
-    <loc>https://hymiee.github.io/STA9750-2025-FALL/summaryreport.html</loc>
-    <lastmod>2025-12-12T16:28:29.184Z</lastmod>
+    <loc>https://hymiee.github.io/STA9750-2025-FALL/mp02.html</loc>
+    <lastmod>2025-10-31T20:23:46.961Z</lastmod>
   </url>
   <url>
-    <loc>https://hymiee.github.io/STA9750-2025-FALL/summary_report.html</loc>
-    <lastmod>2025-12-16T15:26:39.569Z</lastmod>
+    <loc>https://hymiee.github.io/STA9750-2025-FALL/mp04.html</loc>
+    <lastmod>2025-12-05T16:34:46.505Z</lastmod>
   </url>
 </urlset>
